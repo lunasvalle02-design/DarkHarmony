@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<gameList>
+  <game>
+    <path>./Castlevania - Harmony of Dissonance DS.sh</path>
+    <name>Castlevania: Harmony of Dissonance DS</name>
+    <desc>Native static recompilation of Castlevania: Harmony of Dissonance (GBA), adapted to dual-screen handhelds running ROCKNIX. The top screen shows the game; the bottom touch screen shows the castle map, Juste's status, the port settings and the game's own pause menu and map screen. Requires your own USA ROM and GBA BIOS.</desc>
+    <releasedate>20020606T000000</releasedate>
+    <developer>Konami (KCET)</developer>
+    <publisher>Konami</publisher>
+    <genre>Action-Adventure</genre>
+  </game>
+</gameList>

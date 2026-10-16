@@ -1,0 +1,28 @@
+{
+    "version": 2,
+    "name": "hod_ds.zip",
+    "items": [
+        "hod/",
+        "Castlevania - Harmony of Dissonance DS.sh"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Castlevania: Harmony of Dissonance DS",
+        "desc": "Native static recompilation of Castlevania: Harmony of Dissonance (GBA) with a dual-screen interface: the game on top; castle map, status, settings and the game's own menus on the bottom touch screen.",
+        "inst": "Copy your Castlevania - Harmony of Dissonance (USA) ROM (.gba) and gba_bios.bin into ports/hod/.",
+        "genres": [
+            "action",
+            "adventure"
+        ],
+        "porter": [
+            "Luna"
+        ],
+        "image": {},
+        "rtr": false,
+        "runtime": null,
+        "reqs": [],
+        "arch": [
+            "aarch64"
+        ]
+    }
+}

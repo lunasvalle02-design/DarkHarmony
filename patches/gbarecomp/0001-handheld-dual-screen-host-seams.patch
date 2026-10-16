@@ -1,0 +1,271 @@
+diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
+index 712c1bb..3797085 100644
+--- a/src/runtime/host_window.cpp
++++ b/src/runtime/host_window.cpp
+@@ -338,6 +338,12 @@ void log_display_mode(SDL_Window* win, const char* tag) {
+ HostWindow* g_haptic_window = nullptr;
+ // Settings-menu requests from game policies (any thread; consumed by pump).
+ std::atomic<bool> g_settings_menu_requested{false};
++// host_request(): one pending value per kind (-1 = none), consumed by pump.
++std::atomic<int> g_host_requests[static_cast<int>(HostRequest::Count)] = {
++    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
++// Level-triggered state set through host_request.
++bool g_request_fast_forward = false;
++std::atomic<bool> g_swap_ab{false};
+ 
+ struct Backend {
+     SDL_Window*   window   = nullptr;
+@@ -394,6 +400,10 @@ struct Backend {
+     int last_drawable_h = 0;
+     PresentationLayout last_layout{};
+     void (*host_overlay)(HostOverlay*) = nullptr;
++    // Handheld / dual-screen seams (set_present_filter, set_event_hook).
++    const std::uint8_t* (*present_filter)(const std::uint8_t*, int, int) = nullptr;
++    int (*event_hook)(const void*) = nullptr;
++    int scale_mode = 0;              // fixed view: 0 fit, 1 integer, 2 stretch
+     bool anchor_top = false;         // portrait: image at the top edge
+     bool insets_from_env = false;    // GBARECOMP_SAFE_INSETS overrides platform
+     // Mobile lifecycle / haptics.
+@@ -2188,6 +2198,10 @@ bool HostWindow::drawable_size(int* width, int* height) const {
+ void HostWindow::present(const uint8_t* rgb888) {
+     if (!open_ || !impl_ || !rgb888) return;
+     auto* b = static_cast<Backend*>(impl_);
++    if (b->present_filter) {
++        const std::uint8_t* replaced = b->present_filter(rgb888, b->base_w, b->base_h);
++        if (replaced) rgb888 = replaced;
++    }
+     // Present-time color grading (opt-in). Raw is passthrough: the raw
+     // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
+     if (b->color_lut && !b->color_lut->is_passthrough() &&
+@@ -2607,6 +2621,40 @@ void HostWindow::set_host_overlay(void (*overlay)(HostOverlay*)) {
+     static_cast<Backend*>(impl_)->host_overlay = overlay;
+ }
+ 
++void HostWindow::set_present_filter(
++    const std::uint8_t* (*filter)(const std::uint8_t*, int, int)) {
++    if (!open_ || !impl_) return;
++    static_cast<Backend*>(impl_)->present_filter = filter;
++}
++
++void HostWindow::set_event_hook(int (*hook)(const void*)) {
++    if (!open_ || !impl_) return;
++    static_cast<Backend*>(impl_)->event_hook = hook;
++}
++
++void HostWindow::set_scale_mode(int mode) {
++    if (!open_ || !impl_) return;
++    auto* b = static_cast<Backend*>(impl_);
++    b->scale_mode = std::clamp(mode, 0, 2);
++    // Only the fixed 240x160 path uses SDL's logical size; expanded and
++    // adaptive views compute their own destination in present().
++    if (b->expanded_view || b->resize_driven_view) return;
++    if (b->scale_mode == 2) {
++        SDL_RenderSetLogicalSize(b->renderer, 0, 0);
++        SDL_RenderSetIntegerScale(b->renderer, SDL_FALSE);
++    } else {
++        SDL_RenderSetLogicalSize(b->renderer, b->base_w, b->base_h);
++        SDL_RenderSetIntegerScale(b->renderer,
++                                  b->scale_mode == 1 ? SDL_TRUE : SDL_FALSE);
++    }
++}
++
++void host_request(HostRequest request, int value) {
++    const int index = static_cast<int>(request);
++    if (index < 0 || index >= static_cast<int>(HostRequest::Count)) return;
++    g_host_requests[index].store(value < 0 ? 0 : value);
++}
++
+ float HostWindow::px_per_mm() const {
+     if (!open_ || !impl_) return 96.0f / 25.4f;
+     return static_cast<const Backend*>(impl_)->px_per_mm;
+@@ -2705,8 +2753,27 @@ HostWindow::Events HostWindow::pump() {
+     if (!open_) { ev.quit = true; return ev; }
+     auto* b = static_cast<Backend*>(impl_);
+ 
++    // Requests from game-owned UI (host_request), applied between frames.
++    auto take_request = [](HostRequest r) {
++        return g_host_requests[static_cast<int>(r)].exchange(-1);
++    };
++    int req = -1;
++    if (take_request(HostRequest::Quit) >= 0) ev.quit = true;
++    if ((req = take_request(HostRequest::SaveState)) > 0) ev.save_slot = req;
++    if ((req = take_request(HostRequest::LoadState)) > 0) ev.load_slot = req;
++    if ((req = take_request(HostRequest::SetVolume)) >= 0) set_volume(req);
++    if ((req = take_request(HostRequest::SetScaleMode)) >= 0) set_scale_mode(req);
++    if ((req = take_request(HostRequest::SetLinearFilter)) >= 0) set_linear_filter(req != 0);
++    if ((req = take_request(HostRequest::FastForward)) >= 0) g_request_fast_forward = req != 0;
++    if ((req = take_request(HostRequest::SwapAB)) >= 0) g_swap_ab.store(req != 0);
++    if (take_request(HostRequest::FlushSave) >= 0) ev.flush_save = true;
++    if (take_request(HostRequest::SuspendState) >= 0) ev.suspend_state = true;
++    if (take_request(HostRequest::Resumed) >= 0) ev.resumed = true;
++    if ((req = take_request(HostRequest::AudioEnabled)) >= 0) set_audio_enabled(req != 0);
++
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
++        if (b->event_hook && b->event_hook(&e)) continue;
+ #if defined(GBARECOMP_RUNTIME_UI)
+         const bool finger_event =
+             e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
+@@ -2967,9 +3034,13 @@ HostWindow::Events HostWindow::pump() {
+             {8, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER},
+             {9, SDL_CONTROLLER_BUTTON_LEFTSHOULDER},
+         };
++        const bool swap_ab = g_swap_ab.load();
+         for (const auto& binding : pad_map) {
+-            if (SDL_GameControllerGetButton(b->controller, binding.button))
+-                keys &= static_cast<uint16_t>(~(1u << binding.bit));
++            if (SDL_GameControllerGetButton(b->controller, binding.button)) {
++                int bit = binding.bit;
++                if (swap_ab && bit <= 1) bit ^= 1;
++                keys &= static_cast<uint16_t>(~(1u << bit));
++            }
+         }
+     }
+     if (b->touch_controls) {
+@@ -3047,6 +3118,7 @@ HostWindow::Events HostWindow::pump() {
+     if ((fast_sc > SDL_SCANCODE_UNKNOWN && fast_sc < SDL_NUM_SCANCODES &&
+          ks[fast_sc]) || assist_pad_down(b->controller, b->assist_pad[1]))
+         ev.fast_forward = true;
++    if (g_request_fast_forward) ev.fast_forward = true;
+ 
+     const SDL_Scancode rewind_sc = b->assist_key[0];
+     const bool rewind_down =
+@@ -3121,6 +3193,10 @@ void HostWindow::set_touch_pad_visible(bool /*visible*/) {}
+ void HostWindow::set_view_margins(std::uint32_t, std::uint32_t, std::uint32_t,
+                                   std::uint32_t) {}
+ void HostWindow::set_host_overlay(void (*)(HostOverlay*)) {}
++void HostWindow::set_present_filter(const std::uint8_t* (*)(const std::uint8_t*, int, int)) {}
++void HostWindow::set_event_hook(int (*)(const void*)) {}
++void HostWindow::set_scale_mode(int) {}
++void host_request(HostRequest, int) {}
+ float HostWindow::px_per_mm() const { return 96.0f / 25.4f; }
+ void HostWindow::set_presentation_anchor_top(bool) {}
+ bool HostWindow::wait_for_foreground() { return false; }
+diff --git a/src/runtime/host_window.h b/src/runtime/host_window.h
+index 7ab95ec..470896f 100644
+--- a/src/runtime/host_window.h
++++ b/src/runtime/host_window.h
+@@ -226,9 +226,31 @@ public:
+         // wait_for_foreground().
+         bool     enter_background = false;
+         bool     terminating = false;
++        // Handheld lifecycle (host_request): flush the cartridge save and,
++        // for `suspend_state`, also write the suspend state, without blocking
++        // like enter_background does. `resumed` clears the suspend marker and
++        // re-anchors the frame pacer after the device wakes up.
++        bool     flush_save = false;
++        bool     suspend_state = false;
++        bool     resumed = false;
+     };
+     Events pump();
+ 
++    // ---- handheld / dual-screen seams ---------------------------------------
++    // Called at the start of every present() on the guest thread with the frame
++    // about to be shown; returns the buffer to show instead (same dimensions),
++    // or its argument unchanged. Lets a game drive a second window and swap the
++    // top image (e.g. hold the gameplay frame while a menu is shown elsewhere).
++    void set_present_filter(const std::uint8_t* (*filter)(const std::uint8_t* rgb888,
++                                                           int width, int height));
++    // Called first for every SDL event pump() drains (the argument is an
++    // SDL_Event*). Non-zero = consumed, so events of a game-owned window never
++    // reach the game's input path.
++    void set_event_hook(int (*hook)(const void* sdl_event));
++    // Fixed-view presentation: 0 fit (aspect-correct), 1 integer scale,
++    // 2 stretch to the whole window.
++    void set_scale_mode(int mode);
++
+ private:
+     bool open_ = false;
+     void* impl_ = nullptr;  // backend-specific opaque
+@@ -244,6 +266,25 @@ void host_haptic_pulse(int duration_ms, float strength);
+ // menu from a context of its choosing, e.g. Back on the free overworld.
+ void host_request_settings_menu();
+ 
++// Thread-safe requests from game-owned UI (e.g. a touch screen) to the host.
++// They are applied at the next pump(), a clean boundary between frames.
++enum class HostRequest : int {
++    Quit = 0,         // leave the game (cartridge save is flushed as usual)
++    SaveState,        // value = slot 1..10
++    LoadState,        // value = slot 1..10
++    SetVolume,        // value = 0..100
++    SetScaleMode,     // value = see HostWindow::set_scale_mode
++    SetLinearFilter,  // value = 0/1
++    FastForward,      // value = 0/1, level-triggered while set
++    SwapAB,           // value = 0/1, swaps controller A/B onto GBA A/B
++    FlushSave,        // write the cartridge save now
++    SuspendState,     // flush the save and write the suspend state
++    Resumed,          // the device woke up: clear marker, reset pacing
++    AudioEnabled,     // value = 0/1
++    Count
++};
++void host_request(HostRequest request, int value = 0);
++
+ #if defined(GBARECOMP_WEB_HOST)
+ // Persistent browser storage: the page (packaging/web/save_store.js) owns
+ // when /saves is synced to IndexedDB; the runtime only reports that it wrote.
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 9d30f74..648dc91 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -2901,6 +2901,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+             win.set_touch_config_dir(exe_dir.c_str());
+         }
+         win.set_host_overlay(opts.host_overlay);
++        win.set_present_filter(opts.present_filter);
++        win.set_event_hook(opts.host_event);
++        if (opts.scale_mode) win.set_scale_mode(opts.scale_mode);
+         win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
+                              ppu.view_extra_top(), ppu.view_extra_bottom());
+         touch_window = &win;
+@@ -3475,6 +3478,29 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+             input_record_last_value = recorded_keys;
+         }
+         if (ev.quit) host_quit = true;
++        if (ev.flush_save || ev.suspend_state) {
++            // Handheld sleep (host_request): persist now without blocking; the
++            // OS freezes the process right after, so nothing must wait here.
++            const bool saved = flush_save() != SaveFlush::Failed;
++            bool suspended = false;
++            std::string e;
++            if (ev.suspend_state) {
++                suspended = do_savestate_save(suspend_state_path(), e);
++                if (suspended) {
++                    std::ofstream marker(suspend_marker_path(), std::ios::trunc);
++                    marker << ppu.frame_count() << "\n";
++                }
++            }
++            std::fprintf(stderr, "[gbarecomp:runtime] host sleep: save=%s suspend_state=%s%s\n",
++                         saved ? "flushed" : "FAILED",
++                         ev.suspend_state ? (suspended ? "written" : "FAILED ") : "skipped",
++                         e.c_str());
++            std::fflush(stderr);
++        }
++        if (ev.resumed) {
++            clear_suspend_marker();
++            if (pacer) pacer->reset();
++        }
+         if (ev.enter_background || ev.terminating) {
+             // The OS may kill a backgrounded app without further notice:
+             // persist the cartridge save, a suspend state and the session's
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index cb6717c..ec81ea4 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -168,6 +168,17 @@ struct RunOptions {
+     // present after the game image, before the settings menu; guest thread.
+     void (*host_overlay)(HostOverlay* overlay) = nullptr;
+ 
++    // Optional handheld / dual-screen seams (host_window.h). present_filter
++    // sees every frame about to be presented and may return a replacement
++    // image of the same size; host_event sees every SDL event first (an
++    // SDL_Event*) and returns non-zero to consume it. Both run on the guest
++    // thread. scale_mode picks the fixed-view presentation (0 fit, 1 integer,
++    // 2 stretch).
++    const std::uint8_t* (*present_filter)(const std::uint8_t* rgb888,
++                                          int width, int height) = nullptr;
++    int (*host_event)(const void* sdl_event) = nullptr;
++    int scale_mode = 0;
++
+     // Optional game-owned debug TCP commands (JSON line in, JSON line out).
+     // Return non-zero when the request was handled and `reply` was written
+     // through `write` (may be called repeatedly to stream a large reply).

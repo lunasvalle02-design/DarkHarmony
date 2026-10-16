@@ -1,0 +1,61 @@
+#!/bin/bash
+# Castlevania: Harmony of Dissonance DS — launcher for ROCKNIX (Anbernic RG DS / RG DS Plus).
+# Lives in /storage/roms/ports/ next to the hod/ folder.
+#
+# Top screen: the game. Bottom screen: castle map, status and settings (touch);
+# the game's pause menu and map screen move there while open.
+# ROCKNIX (sway) moves to the second screen, and powers on, any window whose title
+# contains "Bottom", "Secondary", "Screen 2"... (see 111-sway-init), hence the fixed title.
+
+XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+
+# PortMaster is optional: if installed, use its control.txt (SDL controller mapping).
+for d in /opt/system/Tools/PortMaster /opt/tools/PortMaster "$XDG_DATA_HOME/PortMaster" /storage/roms/ports/PortMaster /roms/ports/PortMaster; do
+  [ -f "$d/control.txt" ] && { controlfolder="$d"; break; }
+done
+if [ -n "$controlfolder" ]; then
+  # shellcheck disable=SC1091
+  source "$controlfolder/control.txt"
+  [ -f "$controlfolder/mod_${CFW_NAME}.txt" ] && source "$controlfolder/mod_${CFW_NAME}.txt"
+  get_controls
+  export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
+fi
+
+GAMEDIR="$(cd "$(dirname "$0")" && pwd)/hod"
+cd "$GAMEDIR" || exit 1
+exec > "$GAMEDIR/log.txt" 2>&1
+echo "Castlevania: Harmony of Dissonance DS — $(date)"
+
+if ! ls "$GAMEDIR"/*.gba >/dev/null 2>&1; then
+  echo "ERROR: no .gba ROM in $GAMEDIR"
+  echo "Copy your Castlevania - Harmony of Dissonance (USA) ROM here (8 MiB, SHA-1 b90da0d9...)."
+  exit 1
+fi
+if [ ! -f gba_bios.bin ] && [ ! -f bios/gba_bios.bin ]; then
+  echo "ERROR: gba_bios.bin is missing from $GAMEDIR"
+  exit 1
+fi
+
+mkdir -p saves
+chmod +x ./hod.aarch64
+
+# Wayland app_id, for sway rules.
+export SDL_VIDEO_WAYLAND_WMCLASS=hod
+# Guest call chains use the host stack (the binary also raises this itself).
+ulimit -s 65536 2>/dev/null
+
+# Performance line in log.txt every ~5 s (fps and bottom-screen time).
+# export HOD_PERF_LOG=1
+
+# Bottom screen renderer: GPU by default. Uncomment to force software rendering.
+# export HOD_BOTTOM_RENDERER=software
+
+# Single-screen devices: run without the bottom window.
+# export HOD_SINGLE_SCREEN=1
+
+./hod.aarch64
+rc=$?
+echo "hod exited with code $rc"
+
+[ -n "$controlfolder" ] && unset SDL_GAMECONTROLLERCONFIG
+exit $rc

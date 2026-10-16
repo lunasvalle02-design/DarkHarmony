@@ -25,6 +25,23 @@ This project adopts an Ahead-of-Time (AOT) static recompiler architecture:
 
 ---
 
+## ROCKNIX dual-screen port (RG DS / RG DS Plus)
+
+A native aarch64 build for ROCKNIX, packaged PortMaster-style: the game on the
+top screen; castle map, status, settings and the game's own pause menu and map
+screen on the bottom touch screen. Build with Docker:
+
+```powershell
+.\rocknix.ps1 image
+.\rocknix.ps1 all
+.\rocknix.ps1 deploy -DeviceIp 192.168.1.50
+```
+
+See [docs/ROCKNIX.md](docs/ROCKNIX.md) for controls, settings, the optional
+native BIOS and how the port works.
+
+---
+
 ## Verified ROM & BIOS Requirements
 
 This project is an open-source engine reimplementation and does **not** contain copyrighted game ROMs or BIOS files. You must provide your own legally obtained dumps:

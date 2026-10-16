@@ -92,3 +92,10 @@ reference/
 *.bak
 *.tmp
 ~*
+
+# ROCKNIX port: fetched sources, build output and packages
+external/
+dist/
+!rocknix/port/**
+!rocknix/port/hod/README.txt
+!rocknix/port/port.json

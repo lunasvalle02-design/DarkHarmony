@@ -1,0 +1,8 @@
+# Native x86_64 build + headless run of the port (SDL offscreen driver) for
+# automated checks of the bottom screen against the real game.
+FROM debian:bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build ccache pkg-config libsdl2-dev python3 python3-pil binutils-arm-none-eabi \
+ && rm -rf /var/lib/apt/lists/*
+ENV CCACHE_DIR=/work/.cache/ccache-x86
+WORKDIR /work
