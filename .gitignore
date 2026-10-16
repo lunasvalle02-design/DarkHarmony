@@ -1,0 +1,94 @@
+# Build outputs
+build/
+bin/
+out/
+generated/
+src/generated/
+recomp/
+gbarecomp-build/
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Nintendo ROMs, BIOS, and cartridge saves (never distribute)
+*.gba
+*.gbc
+*.gb
+*.rom
+*.bios
+*.sav
+*.srm
+*.fla
+*.eep
+*.bin
+gba_bios.bin
+open_gba_bios.bin
+GBA_bios.rom
+
+# Tool caches, diagnostics, logs
+*.log
+*.json
+!docs/FRAMEWORK_PIN.json
+!manifest.json
+*.jsonl
+*.bmp
+*.png
+*.txt
+!CMakeLists.txt
+!**/CMakeLists.txt
+!README.md
+!README.zh-CN.md
+!LICENSE
+!THIRD_PARTY.md
+!THIRD_PARTY_NOTICES.md
+!third_party_licenses/**
+!third_party_licenses/*.txt
+*.toml.frag
+recomp_cache/
+recomp_master_misses*
+recomp_coverage.json
+recomp_seed_proposals.toml
+docs/evidence/
+docs/frames*/
+__pycache__/
+*.py[cod]
+.cache/
+
+# Local dependency copies and tooling
+third_party/
+.deps/
+logs/
+diagnostics/
+trace/
+saves/
+roms/
+
+# Launcher runtime caches and release stage
+*.cfg
+*.ini
+release-stage/
+
+# Editor / OS
+.vscode/
+.vs/
+.idea/
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Agent / private notes (keep on disk, never upload)
+AGENT_PROMPT.md
+docs/PROGRESS.md
+reference/
+*.bak
+*.tmp
+~*
