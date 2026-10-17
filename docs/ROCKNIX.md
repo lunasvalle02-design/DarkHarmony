@@ -62,6 +62,7 @@ your game files.
 | `TURBO` | Uncapped speed while on (not saved) |
 | `MOSTRAR FPS` | Frame rate in the bottom header |
 | `REANUDAR TRAS SUSPENDER` | Also write a suspend state when the device sleeps (resumes there if the battery dies) |
+| `CALIBRAR TÁCTIL` | Tap the centre of three crosses; the average offset is saved (`touch_dx`, `touch_dy` in `hod.cfg`, bottom-canvas pixels) and added to every tap. The default lifts taps by 4 canvas px (16 screen px). `HOD_TOUCH_DEBUG=1` logs every tap |
 | `GUARDAR/CARGAR ESTADO` | Save state slot 1 (tap twice) |
 | `IDIOMA` | Español / English |
 
@@ -121,12 +122,37 @@ from a RAM dump for comparison with the game's map screen.
 
 ### Performance
 
-- Native aarch64, `-march=armv8.2-a -mtune=cortex-a55`, `-O2` everywhere.
+- Native aarch64, `-march=armv8.2-a -mtune=cortex-a55`, `-O2` everywhere, non-PIE.
 - The four ~50 MB generated shards are split at function boundaries
   (`tools/split_shards.py`) into 6 MB units: parallel builds with bounded memory
   and -O2 for the game code (`GUEST_OPT=-O1` lowers it if a build machine
   struggles). The generated code itself is never edited.
 - **Native BIOS — the biggest single win.** See below.
+- **Inline guest fast paths** (patch `0003`, `armv4t/runtime_guest_fastpath.h`,
+  compiled only into the game code): the generated code calls
+  `runtime_should_yield()` and `runtime_tick()` after every GBA instruction, a
+  bus helper plus `runtime_mem_cycles()` per access and a flag helper for most
+  Thumb instructions. They are now inline: the tick only adds to the cycle
+  budget until the next device event (then the full `runtime_tick` runs: DMA
+  steal, IRQ), EWRAM/IWRAM/ROM accesses go straight to memory, and the
+  per-instruction trace checks the port never arms are compiled out. Anything
+  that ticks devices, writes MMIO, pumps input or loads a state re-arms the
+  full path, so behaviour is unchanged.
+  The binary is linked non-PIE so this state, `g_cpu` and the wait table are
+  addressed directly instead of through the GOT. On x86 the game time per
+  frame went from 1.54 to 1.12 ms (PPU thread included); captures of a
+  17 000-frame scripted run are identical with and without these paths.
+- **PPU on a second core** (`GBARECOMP_PPU_THREAD=1`, set by the port): each
+  visible line is composed by a worker thread from a copy of that line's
+  display registers, palette and OAM taken at its HBlank (VRAM is read live).
+  The frame is latched only after the worker finished it. On the device the
+  PPU was ~3 ms of each drawn frame.
+- **Audio never blocks the game**: the SDL callback resamples under the bridge
+  mutex (up to 7 ms on the device); the producer now uses a try-lock and
+  carries the block over to the next frame instead of waiting.
+- **Full coverage**: 11 PCs the first on-device session interpreted (a game
+  area at ~21 fps) were added to `game.toml`; `src/game` was regenerated with
+  the pinned `gba_recompile` (314 more functions, 18 825 in total).
 - **Frameskip** (`SALTO DE FRAMES`, patch `0002`): a skipped frame runs the
   game normally but is neither rasterized by the PPU nor presented. `AUTO`
   skips only after the frame pacer finds a frame late, at most two in a row
@@ -191,7 +217,9 @@ frame pacing.
 
 ### Versions
 
-`rocknix/config/versions.env` pins GBARecomp **5e89943**. `docs/FRAMEWORK_PIN.json`
+`rocknix/config/versions.env` pins GBARecomp **5e89943**. `src/game` was regenerated
+with that commit's `gba_recompile` (`rocknix/scripts/regen-game.sh`, the Linux
+counterpart of `scripts/recompile.ps1`). `docs/FRAMEWORK_PIN.json`
 names `d11a362`, but the generated code in `src/game` uses the tail-call macros
 (`GBARECOMP_TAIL_CALL`, …) that only exist in later commits.
 

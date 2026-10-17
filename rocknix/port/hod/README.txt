@@ -15,8 +15,8 @@ Bottom screen (touch)
   ESTADO / STATUS   HP, MP, hearts, level, stats, play time, map completion
   AJUSTES / SETTINGS
                     top-screen scaling and filter, volume, menus on the bottom
-                    screen, swap A/B, frameskip, turbo, FPS, save/load state,
-                    language, quit
+                    screen, swap A/B, frameskip, turbo, FPS, touch calibration,
+                    save/load state, language, quit
 
 Files written here: saves/hod.sav (in-game save), hod.cfg (settings), log.txt,
 *.state1 (save state) and *.suspend.state (only while the device sleeps).

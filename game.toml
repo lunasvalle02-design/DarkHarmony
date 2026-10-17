@@ -674,3 +674,60 @@ mode = "arm"
 addr = 0x0806FC18
 mode = "arm"
 
+
+# ROCKNIX port, RG DS Plus session 2026-10-17: bridged on device (log.txt).
+[[extra_func]]
+addr = 0x08021C6C
+mode = "thumb"
+note = "bridged x1 on device"
+
+[[extra_func]]
+addr = 0x08021D44
+mode = "thumb"
+note = "bridged x1254 on device"
+
+[[extra_func]]
+addr = 0x08068598
+mode = "thumb"
+note = "bridged x1 on device"
+
+[[extra_func]]
+addr = 0x08068680
+mode = "thumb"
+note = "bridged x1254 on device"
+
+[[extra_func]]
+addr = 0x08068C8C
+mode = "thumb"
+note = "bridged x1254 on device"
+
+[[extra_func]]
+addr = 0x08068E74
+mode = "thumb"
+note = "bridged x1254 on device"
+
+[[extra_func]]
+addr = 0x08069038
+mode = "thumb"
+note = "bridged x7524 on device"
+
+[[extra_func]]
+addr = 0x0806FE58
+mode = "thumb"
+note = "bridged x126 on device"
+
+[[extra_func]]
+addr = 0x08070200
+mode = "thumb"
+note = "bridged x585 on device"
+
+[[extra_func]]
+addr = 0x080702E8
+mode = "thumb"
+note = "bridged x53 on device"
+
+[[extra_func]]
+addr = 0x08079B48
+mode = "thumb"
+note = "bridged x8 on device"
+

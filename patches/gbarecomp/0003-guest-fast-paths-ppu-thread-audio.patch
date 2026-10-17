@@ -1,0 +1,731 @@
+diff --git a/src/armv4t/runtime_arm.cpp b/src/armv4t/runtime_arm.cpp
+index 3d07d55..9074f36 100644
+--- a/src/armv4t/runtime_arm.cpp
++++ b/src/armv4t/runtime_arm.cpp
+@@ -1171,6 +1171,7 @@ extern "C" uint32_t runtime_mrs_spsr(void) {
+ }
+ 
+ extern "C" void runtime_msr_cpsr(uint32_t value, uint32_t mask) {
++    runtime_fastpath_invalidate();  // may unmask a pending IRQ
+     uint32_t bytewise = 0;
+     if (mask & 1u) bytewise |= 0x000000FFu;
+     if (mask & 2u) bytewise |= 0x0000FF00u;
+@@ -1233,6 +1234,7 @@ extern "C" uint32_t runtime_exception_return_refill(uint32_t target_pc) {
+ }
+ 
+ extern "C" void runtime_exception_return(uint32_t new_pc) {
++    runtime_fastpath_invalidate();  // restores CPSR: may unmask a pending IRQ
+     uint32_t old_cpsr = g_cpu.cpsr;
+     uint32_t old_mode = old_cpsr & 0x1Fu;
+     if (old_mode == 0x10u || old_mode == 0x1Fu) {
+@@ -1286,6 +1288,7 @@ extern "C" void runtime_note_interpreted_exception_return(uint32_t old_mode) {
+ }
+ 
+ extern "C" void runtime_restore_cpsr_from_spsr(void) {
++    runtime_fastpath_invalidate();  // may unmask a pending IRQ
+     uint32_t old_cpsr = g_cpu.cpsr;
+     uint32_t old_mode = old_cpsr & 0x1Fu;
+     if (old_mode == 0x10u || old_mode == 0x1Fu) {
+diff --git a/src/armv4t/runtime_arm.h b/src/armv4t/runtime_arm.h
+index 1320736..6d48efd 100644
+--- a/src/armv4t/runtime_arm.h
++++ b/src/armv4t/runtime_arm.h
+@@ -403,6 +403,23 @@ uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
+                                    uint32_t max_entries);
+ void runtime_tick(uint32_t cycles);
+ bool runtime_should_yield(void);
++// State shared with the inline guest fast paths (runtime_guest_fastpath.h).
++typedef struct RuntimeFastState {
++    unsigned long long cycles;     // g_runtime_cycles (an alias of this field)
++    long long budget;              // the scheduler's next-event budget
++    unsigned long long pending;    // cycles not yet materialized into devices
++    unsigned yield_slow;           // next runtime_should_yield must run in full
++    unsigned mem_fast;             // EWRAM/IWRAM may bypass the bus
++    unsigned rom_fast;             // cartridge ROM may bypass the bus
++    uint32_t rom_size;
++    uint8_t* ewram;
++    uint8_t* iwram;
++    const uint8_t* rom;
++} RuntimeFastState;
++extern RuntimeFastState g_rt;
++// Sends the next tick / yield of generated code through the full functions
++// (see runtime_guest_fastpath.h). Call after changing state they depend on.
++void runtime_fastpath_invalidate(void);
+ 
+ // ── Stage 2 idle-loop elision ──────────────────────────────────────
+ // Emitted by codegen at the back-edge of a statically-eligible quiescent
+@@ -528,3 +545,7 @@ void runtime_shutdown(void);
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
++
++#if defined(GBARECOMP_INLINE_FASTPATH)
++#include "runtime_guest_fastpath.h"
++#endif
+diff --git a/src/armv4t/runtime_guest_fastpath.h b/src/armv4t/runtime_guest_fastpath.h
+new file mode 100644
+index 0000000..e7a4a9e
+--- /dev/null
++++ b/src/armv4t/runtime_guest_fastpath.h
+@@ -0,0 +1,219 @@
++// runtime_guest_fastpath.h — inline fast paths for the per-instruction runtime
++// calls of generated code (opt-in: GBARECOMP_INLINE_FASTPATH, defined only
++// for the translation units of a game's generated code).
++//
++// Generated code calls runtime_should_yield() and runtime_tick() once per
++// guest instruction, a bus helper plus runtime_mem_cycles() per access and a
++// flag helper for most Thumb instructions. On small in-order cores
++// (Cortex-A55) those out-of-line calls dominate the frame. The wrappers below
++// handle the common case inline and fall back to the unchanged runtime
++// functions whenever anything could differ:
++//
++//   tick   — inline only while the next device event is still ahead
++//            (g_rt.budget, the runtime's event budget, stays > 0). Anything
++//            that could make the full tick behave differently — materialized
++//            device state, an MMIO write, a CPSR write that may unmask an IRQ,
++//            an input pump or a state load — zeroes the budget
++//            (runtime_fastpath_invalidate), so the next tick runs the full
++//            runtime_tick (device catch-up, DMA steal, IRQ check) as before.
++//   yield  — inline "no" only outside the BIOS while g_rt.yield_slow is clear;
++//            the full runtime_should_yield() recomputes it and every device
++//            materialization (VBlank start, HALT, …) sets it.
++//   memory — EWRAM/IWRAM and plain cartridge ROM accesses go straight to the
++//            backing arrays while no bus write observer, read override,
++//            GPIO, EEPROM or ROM mapper is involved (g_rt.mem_fast,
++//            g_rt.rom_fast). Everything else takes the full bus path.
++//
++// The state shares one struct so a function addresses it from one base.
++// Session (netplay) execution and shadow ticks keep the budget at zero, i.e.
++// the full path on every call.
++#pragma once
++
++#include <stdint.h>
++#include <string.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++extern unsigned long long g_runtime_cycles;
++extern unsigned long long g_idle_disturb_epoch;
++
++// Sub-switches (all on by default) to weigh code size against calls.
++#ifndef GBARECOMP_FASTPATH_MEM
++#define GBARECOMP_FASTPATH_MEM 1
++#endif
++#ifndef GBARECOMP_FASTPATH_FLAGS
++#define GBARECOMP_FASTPATH_FLAGS 1
++#endif
++
++#if defined(__GNUC__)
++#define RT_LIKELY(x) __builtin_expect(!!(x), 1)
++#define RT_INLINE static inline __attribute__((always_inline))
++#else
++#define RT_LIKELY(x) (x)
++#define RT_INLINE static inline
++#endif
++
++// The full functions are the rare path here: keep their call sequences out of
++// the hot instruction stream.
++#if defined(__GNUC__)
++void runtime_tick(uint32_t cycles) __attribute__((cold));
++bool runtime_should_yield(void) __attribute__((cold));
++#endif
++
++RT_INLINE void rt_fast_tick(uint32_t cycles) {
++    const long long budget = g_rt.budget - (long long)cycles;
++    if (RT_LIKELY(budget > 0)) {
++        g_rt.budget = budget;
++        g_rt.pending += cycles;
++        g_rt.cycles += cycles;
++        return;
++    }
++    runtime_tick(cycles);
++}
++
++RT_INLINE bool rt_fast_should_yield(void) {
++    if (RT_LIKELY(g_rt.yield_slow == 0u && g_cpu.R[15] >= 0x00004000u)) return false;
++    return runtime_should_yield();
++}
++
++RT_INLINE uint32_t rt_fast_mem_cycles(uint32_t addr, uint32_t width, uint32_t sequential) {
++    const uint32_t region = addr >> 24;
++    if (region > 0xFu) return 1u;
++    if (region >= 0xEu) return 1u + g_runtime_waits.n16[region];
++    if (width == 4u) return 1u + (sequential ? g_runtime_waits.s32[region] : g_runtime_waits.n32[region]);
++    return 1u + (sequential ? g_runtime_waits.s16[region] : g_runtime_waits.n16[region]);
++}
++
++// Backing pointer for a direct access of `width` bytes at `addr`, or null.
++RT_INLINE const uint8_t* rt_fast_read_ptr(uint32_t addr, uint32_t width) {
++    const uint32_t region = addr >> 24;
++    if (region == 0x02u) return g_rt.mem_fast ? g_rt.ewram + (addr & 0x3FFFFu) : 0;
++    if (region == 0x03u) return g_rt.mem_fast ? g_rt.iwram + (addr & 0x7FFFu) : 0;
++    if (region >= 0x08u && region <= 0x0Du && g_rt.rom_fast) {
++        const uint32_t off = addr & 0x01FFFFFFu;
++        if (off + width <= g_rt.rom_size) return g_rt.rom + off;
++    }
++    return 0;
++}
++
++RT_INLINE uint8_t* rt_fast_write_ptr(uint32_t addr) {
++    if (!g_rt.mem_fast) return 0;
++    const uint32_t region = addr >> 24;
++    if (region == 0x02u) return g_rt.ewram + (addr & 0x3FFFFu);
++    if (region == 0x03u) return g_rt.iwram + (addr & 0x7FFFu);
++    return 0;
++}
++
++RT_INLINE uint32_t rt_fast_read_u32(uint32_t addr) {
++    const uint8_t* p = rt_fast_read_ptr(addr, 4u);
++    if (RT_LIKELY(p != 0)) { uint32_t v; memcpy(&v, p, 4); return v; }
++    return bus_read_u32(addr);
++}
++RT_INLINE uint16_t rt_fast_read_u16(uint32_t addr) {
++    const uint8_t* p = rt_fast_read_ptr(addr, 2u);
++    if (RT_LIKELY(p != 0)) { uint16_t v; memcpy(&v, p, 2); return v; }
++    return bus_read_u16(addr);
++}
++RT_INLINE uint8_t rt_fast_read_u8(uint32_t addr) {
++    const uint8_t* p = rt_fast_read_ptr(addr, 1u);
++    if (RT_LIKELY(p != 0)) return *p;
++    return bus_read_u8(addr);
++}
++RT_INLINE void rt_fast_write_u32(uint32_t addr, uint32_t v) {
++    uint8_t* p = rt_fast_write_ptr(addr);
++    if (RT_LIKELY(p != 0)) { memcpy(p, &v, 4); ++g_idle_disturb_epoch; return; }
++    bus_write_u32(addr, v);
++}
++RT_INLINE void rt_fast_write_u16(uint32_t addr, uint16_t v) {
++    uint8_t* p = rt_fast_write_ptr(addr);
++    if (RT_LIKELY(p != 0)) { memcpy(p, &v, 2); ++g_idle_disturb_epoch; return; }
++    bus_write_u16(addr, v);
++}
++RT_INLINE void rt_fast_write_u8(uint32_t addr, uint8_t v) {
++    uint8_t* p = rt_fast_write_ptr(addr);
++    if (RT_LIKELY(p != 0)) { *p = v; ++g_idle_disturb_epoch; return; }
++    bus_write_u8(addr, v);
++}
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#define runtime_tick(c) rt_fast_tick(c)
++#define runtime_should_yield() rt_fast_should_yield()
++#define runtime_mem_cycles(a, w, s) rt_fast_mem_cycles((a), (w), (s))
++#if GBARECOMP_FASTPATH_MEM
++#define bus_read_u32(a) rt_fast_read_u32(a)
++#define bus_read_u16(a) rt_fast_read_u16(a)
++#define bus_read_u8(a) rt_fast_read_u8(a)
++#define bus_write_u32(a, v) rt_fast_write_u32((a), (v))
++#define bus_write_u16(a, v) rt_fast_write_u16((a), (v))
++#define bus_write_u8(a, v) rt_fast_write_u8((a), (v))
++#endif
++
++// ── Flags and conditions (same semantics as runtime_arm.cpp, inline) ──
++RT_INLINE void rt_set_nz(uint32_t r) {
++    uint32_t c = g_cpu.cpsr & ~(CPSR_N_BIT | CPSR_Z_BIT);
++    c |= r & 0x80000000u;  // N is bit 31
++    if (r == 0) c |= CPSR_Z_BIT;
++    g_cpu.cpsr = c;
++}
++RT_INLINE void rt_set_nzc_logic(uint32_t r, uint32_t shifter_carry) {
++    uint32_t c = g_cpu.cpsr & ~(CPSR_N_BIT | CPSR_Z_BIT | CPSR_C_BIT);
++    c |= r & 0x80000000u;
++    if (r == 0) c |= CPSR_Z_BIT;
++    if (shifter_carry) c |= CPSR_C_BIT;
++    g_cpu.cpsr = c;
++}
++RT_INLINE void rt_set_nzcv_add(uint32_t a, uint32_t b, uint32_t r) {
++    uint32_t c = g_cpu.cpsr & ~(CPSR_N_BIT | CPSR_Z_BIT | CPSR_C_BIT | CPSR_V_BIT);
++    c |= r & 0x80000000u;
++    if (r == 0) c |= CPSR_Z_BIT;
++    if (r < a) c |= CPSR_C_BIT;
++    if ((~(a ^ b) & (a ^ r)) & 0x80000000u) c |= CPSR_V_BIT;
++    g_cpu.cpsr = c;
++}
++RT_INLINE void rt_set_nzcv_sub(uint32_t a, uint32_t b, uint32_t r) {
++    uint32_t c = g_cpu.cpsr & ~(CPSR_N_BIT | CPSR_Z_BIT | CPSR_C_BIT | CPSR_V_BIT);
++    c |= r & 0x80000000u;
++    if (r == 0) c |= CPSR_Z_BIT;
++    if (a >= b) c |= CPSR_C_BIT;
++    if (((a ^ b) & (a ^ r)) & 0x80000000u) c |= CPSR_V_BIT;
++    g_cpu.cpsr = c;
++}
++RT_INLINE int rt_cond_passes(unsigned cond) {
++    const uint32_t n = cpsr_n(), z = cpsr_z(), c = cpsr_c(), v = cpsr_v();
++    switch (cond & 0xFu) {
++        case 0x0: return z != 0;
++        case 0x1: return z == 0;
++        case 0x2: return c != 0;
++        case 0x3: return c == 0;
++        case 0x4: return n != 0;
++        case 0x5: return n == 0;
++        case 0x6: return v != 0;
++        case 0x7: return v == 0;
++        case 0x8: return (c != 0) && (z == 0);
++        case 0x9: return (c == 0) || (z != 0);
++        case 0xA: return n == v;
++        case 0xB: return n != v;
++        case 0xC: return (z == 0) && (n == v);
++        case 0xD: return (z != 0) || (n != v);
++        case 0xE: return 1;
++        default:  return 0;  // NV: never on ARMv4T
++    }
++}
++#if GBARECOMP_FASTPATH_FLAGS
++#define arm_set_nz(r) rt_set_nz(r)
++#define arm_set_nzc_logic(r, c) rt_set_nzc_logic((r), (c))
++#define arm_set_nzcv_add(a, b, r) rt_set_nzcv_add((a), (b), (r))
++#define arm_set_nzcv_sub(a, b, r) rt_set_nzcv_sub((a), (b), (r))
++#define arm_cond_passes(c) rt_cond_passes(c)
++#endif
++
++// ── Debug hooks the port never arms: compiled out of the game code ──
++// (instruction trace, runtime trace ring, function-entry hook).
++#define g_runtime_insn_trace 0u
++#define runtime_trace_enabled() 0
++#define g_runtime_fn_entry_hook ((void (*)(uint32_t))0)
+diff --git a/src/gba/gba_bus.h b/src/gba/gba_bus.h
+index c9636af..e1ed739 100644
+--- a/src/gba/gba_bus.h
++++ b/src/gba/gba_bus.h
+@@ -265,6 +265,7 @@ public:
+     // Register (or clear, with nullptr) the P6 gate write observer. Null in all
+     // normal play / the gcc path → the hook is one predicted-untaken branch per
+     // store. Owned by the caller (the gate); GbaBus only holds the pointer.
++    bool has_write_observer() const { return write_observer_ != nullptr; }
+     void set_write_observer(BusWriteObserver* obs) { write_observer_ = obs; }
+     BusWriteObserver* exchange_write_observer(BusWriteObserver* obs) {
+         BusWriteObserver* previous = write_observer_;
+diff --git a/src/gba/gba_ppu.cpp b/src/gba/gba_ppu.cpp
+index 208ec40..0681fde 100644
+--- a/src/gba/gba_ppu.cpp
++++ b/src/gba/gba_ppu.cpp
+@@ -8,9 +8,20 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstring>
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <thread>
+ 
+ #include "snapshot.h"
+ 
++namespace gba {
++namespace {
++void sync_scanline_worker();  // scanline worker, defined before GbaPpu::render_scanline
++}  // namespace
++}  // namespace gba
++
+ namespace gba {
+ 
+ // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
+@@ -123,6 +134,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+     vcount_          = r.u16();
+     frame_count_     = r.u64();
+     const bool serialized_latch = r.boolean();
++    sync_scanline_worker();
+     if (!view_expanded()) {
+         // Historical native-width restore path, deliberately unchanged.
+         has_latched_fb_ = serialized_latch;
+@@ -166,6 +178,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+ }
+ 
+ void GbaPpu::reset() {
++    sync_scanline_worker();
+     foreign_presentation_internal::clear();
+     scanline_ = 0;
+     dot_in_scanline_ = 0;
+@@ -828,9 +841,13 @@ void render_scanline_internal(uint8_t* rgb,
+     // room BG with higher priority may cover the HUD's BG0 cells. Capturing
+     // only the explicitly declared source map cells keeps that room terrain
+     // out of the foreign frame.
+-    PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
++    // Only written with a foreign OBJ focus and only read with a foreign
++    // background: keep it out of the per-scanline cost otherwise.
++    static thread_local PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth];
+     const GbaForeignObjFocusTransform* foreign_focus =
+         foreign_presentation_internal::obj_focus();
++    if (foreign_focus || foreign_presentation_internal::background())
++        std::fill(std::begin(foreign_hud_bg), std::end(foreign_hud_bg), PixelCandidate{});
+     const uint16_t backdrop_color = load_u16_le(&pal[0]);
+ #if !defined(GBARECOMP_SCANLINE_HLE)
+     uint8_t backdrop_rgb[3];
+@@ -2424,6 +2441,102 @@ void GbaPpu::render(uint8_t* rgb,
+ 
+ #endif
+ 
++// ── Scanline worker (opt-in: GBARECOMP_PPU_THREAD=1) ─────────────────────────
++// Composes visible scanlines on a second core. Each job carries this line's
++// display registers (the affine-adjusted IO image), palette and OAM as they
++// are at the line's HBlank, i.e. what the inline call would have read; only
++// VRAM is read live. render_scanline_internal reads nothing else, so the image
++// matches the inline renderer unless the game rewrites VRAM tiles of a line
++// within the ~1 line the worker trails behind. Every reader of the work
++// framebuffer (latch, render, reset, state load) waits for it first.
++namespace {
++
++struct ScanlineJob {
++    uint8_t* fb;
++    uint32_t y;
++    uint16_t dispcnt;
++    const uint8_t* vram;
++    std::array<uint8_t, 0x60> io;
++    std::array<uint8_t, 0x400> pal;
++    std::array<uint8_t, 0x400> oam;
++};
++
++class ScanlineWorker {
++public:
++    static ScanlineWorker* get() {
++        static const bool enabled = [] {
++            const char* e = std::getenv("GBARECOMP_PPU_THREAD");
++            return e && e[0] == '1';
++        }();
++        if (!enabled) return nullptr;
++        static ScanlineWorker worker;
++        return &worker;
++    }
++
++    void submit(uint8_t* fb, uint32_t y, uint16_t dispcnt, const uint8_t* io,
++                const uint8_t* vram, const uint8_t* oam, const uint8_t* pal) {
++        const uint64_t n = submitted_.load(std::memory_order_relaxed);
++        while (n - done_.load(std::memory_order_acquire) >= kRing - 1) std::this_thread::yield();
++        ScanlineJob& job = jobs_[n % kRing];
++        job.fb = fb;
++        job.y = y;
++        job.dispcnt = dispcnt;
++        job.vram = vram;
++        std::memcpy(job.io.data(), io, job.io.size());
++        std::memcpy(job.pal.data(), pal, job.pal.size());
++        std::memcpy(job.oam.data(), oam, job.oam.size());
++        submitted_.store(n + 1, std::memory_order_release);
++    }
++
++    void sync() {
++        const uint64_t n = submitted_.load(std::memory_order_relaxed);
++        while (done_.load(std::memory_order_acquire) != n) std::this_thread::yield();
++    }
++
++    ~ScanlineWorker() {
++        stop_.store(true, std::memory_order_release);
++        if (thread_.joinable()) thread_.join();
++    }
++
++private:
++    static constexpr uint64_t kRing = 256;  // > 160 visible lines per frame
++
++    ScanlineWorker() : thread_([this] { run(); }) {}
++
++    void run() {
++        unsigned idle = 0;
++        while (!stop_.load(std::memory_order_acquire)) {
++            const uint64_t d = done_.load(std::memory_order_relaxed);
++            if (d == submitted_.load(std::memory_order_acquire)) {
++                // Lines arrive every ~50 us of guest time while a frame is
++                // drawn; spin briefly, then nap through VBlank and pauses.
++                if (++idle < 4096) std::this_thread::yield();
++                else std::this_thread::sleep_for(std::chrono::microseconds(200));
++                continue;
++            }
++            idle = 0;
++            const ScanlineJob& job = jobs_[d % kRing];
++            render_scanline_internal(job.fb, job.y, job.dispcnt, job.io.data(), job.vram,
++                                     job.oam.data(), job.pal.data(), GbaPpu::kScreenWidth,
++                                     GbaPpu::kScreenHeight);
++            done_.store(d + 1, std::memory_order_release);
++        }
++    }
++
++    std::array<ScanlineJob, kRing> jobs_{};
++    std::atomic<uint64_t> submitted_{0};
++    std::atomic<uint64_t> done_{0};
++    std::atomic<bool> stop_{false};
++    std::thread thread_;
++};
++
++void sync_scanline_worker() {
++    if (ScanlineWorker* w = ScanlineWorker::get()) w->sync();
++}
++
++}  // namespace
++
++
+ void GbaPpu::render_scanline(uint32_t y,
+                              uint16_t dispcnt,
+                              const uint8_t* io,
+@@ -2468,6 +2581,10 @@ void GbaPpu::render_scanline(uint32_t y,
+ 
+     if (!rasterization_enabled_ || frame_skip_) return;
+     if (!view_expanded()) {
++        if (ScanlineWorker* worker = ScanlineWorker::get()) {
++            worker->submit(work_fb_.data(), y, dispcnt, affine_io.data(), vram, oam, pal);
++            return;
++        }
+         render_scanline_internal(work_fb_.data(), y, dispcnt,
+                                  affine_io.data(), vram, oam, pal,
+                                  kScreenWidth, kScreenHeight);
+@@ -2506,11 +2623,13 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
+                                const uint8_t* vram,
+                                const uint8_t* oam,
+                                const uint8_t* pal) {
++    sync_scanline_worker();
+     render(work_fb_.data(), dispcnt, io, vram, oam, pal);
+     mark_framebuffer_latched();
+ }
+ 
+ void GbaPpu::mark_framebuffer_latched() {
++    sync_scanline_worker();
+     if (rasterization_enabled_ && !frame_skip_)
+         std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
+     has_latched_fb_ = true;
+@@ -2518,6 +2637,7 @@ void GbaPpu::mark_framebuffer_latched() {
+ }
+ 
+ void GbaPpu::set_rasterization_enabled(bool enabled) {
++    sync_scanline_worker();
+     rasterization_enabled_ = enabled;
+     if (!enabled) {
+         std::fill(work_fb_.begin(),work_fb_.end(),0);
+diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
+index 3cee87a..8d2b325 100644
+--- a/src/runtime/host_window.cpp
++++ b/src/runtime/host_window.cpp
+@@ -471,6 +471,9 @@ struct Backend {
+     int          fullscreen = 0;        // 0 windowed, 1 borderless, 2 exclusive
+     int          volume = 100;          // 0..100 gain on pushed samples
+     std::vector<int16_t> volume_buf;    // scratch for gain != 100
++    // Samples produced while the audio callback held the bridge mutex; pushed
++    // with the next block so the guest thread never waits on the resampler.
++    std::vector<int16_t> audio_pending;
+     // FPS readout (DisplayPerf hotkey): presents/sec in the title bar.
+     bool         fps_readout = false;
+     std::string  title;                 // base window title (readout restores it)
+@@ -2064,9 +2067,19 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+     // Producer: append mono frames into the bridge ring. The SDL callback
+     // (gba_audio_callback) drains it at the device rate with band-limited
+     // resampling + a P-only fill servo — no queue underrun, no hard flush.
+-    SDL_LockMutex(b->audio_mtx);
+-    rab_push(&b->bridge, samples, static_cast<int>(count)); // mono: count == frames
+-    SDL_UnlockMutex(b->audio_mtx);
++    // Never block on the callback (it resamples under the mutex, several ms on
++    // small cores): if it is busy, keep the block and push it next time.
++    b->audio_pending.insert(b->audio_pending.end(), samples, samples + count);
++    if (SDL_TryLockMutex(b->audio_mtx) == 0) {
++        rab_push(&b->bridge, b->audio_pending.data(),
++                 static_cast<int>(b->audio_pending.size()));  // mono: samples == frames
++        SDL_UnlockMutex(b->audio_mtx);
++        b->audio_pending.clear();
++    } else if (b->audio_pending.size() > 32768) {
++        // Callback stuck for ~0.5 s: drop the oldest audio rather than grow.
++        b->audio_pending.erase(b->audio_pending.begin(),
++                               b->audio_pending.end() - 16384);
++    }
+ 
+     // ── NES-mode crackle probe (measure step) ──────────────────────────
+     // GBARECOMP_AUDIO_PROBE=1 reports the BRIDGE's underrun/overflow counters
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 54f9991..05d6c00 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -3404,6 +3404,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+     }
+ 
+     auto pump_host_input = [&]() {
++        // Input, savestates and host requests can change state the inline
++        // guest fast paths cache: take the full tick/yield path once.
++        runtime_fastpath_invalidate();
+         if (!args.window) return;
+         capture_rewind_point();
+         auto ev = win.pump();
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index 9cc47d1..fd16187 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -93,6 +93,21 @@ static const bool g_phase_prof = [] {
+ }();
+ static unsigned long long g_runtime_yielded_vblank_start = 0;
+ static bool g_session_execution = false;
++
++// Inline guest fast paths (armv4t/runtime_guest_fastpath.h). Non-zero flags
++// send the next runtime_tick / runtime_should_yield of generated code through
++// the full functions below; anything that materializes device state, writes
++// MMIO or restores timing sets both.
++extern "C" {
++// budget/pending ARE the scheduler's g_event_budget/g_pending_cycles (below).
++RuntimeFastState g_rt = {0, 0, 0, 1u, 0u, 0u, 0u, nullptr, nullptr, nullptr};
++// A zero budget sends the next tick of generated code through runtime_tick;
++// at worst that materializes device state early, exactly like an MMIO access.
++void runtime_fastpath_invalidate(void) { g_rt.budget = 0; g_rt.yield_slow = 1u; }
++#define g_event_budget (g_rt.budget)
++#define g_pending_cycles (g_rt.pending)
++}
++static void rt_fast_refresh();
+ static bool g_session_instruction_started = false;
+ static bool g_session_slice = false, g_session_slice_stopped = false;
+ static std::uint64_t g_session_slice_deadline = 0;
+@@ -108,7 +123,12 @@ extern "C" uint32_t g_irq_nest_depth;
+ // summed the halt path, which is why it was incomparable to the interpreter's
+ // fixed-quantum clock.) runtime_trace_event stamps this onto every ring entry
+ // so the recomp and the bios_smoke interp oracle align by identical cycles.
+-extern "C" unsigned long long g_runtime_cycles = 0;
++// Lives in g_rt (first field) so the inline tick updates every counter from
++// one base address; the symbol keeps its name and type for the rest of the
++// runtime.
++extern "C" unsigned long long g_runtime_cycles __attribute__((alias("g_rt")));
++// In this file, go through the struct too, so the compiler sees one object.
++#define g_runtime_cycles (g_rt.cycles)
+ 
+ // ── Stage 2 idle-loop elision: disturbance epoch + skip counters ─────────────
+ // Bumped whenever something happens that could change a watched poll value or
+@@ -262,8 +282,30 @@ void sync_bios_access() {
+     }
+ }
+ 
++// Which guest accesses may bypass the bus: none while a write observer, a read
++// override or session/shadow execution is active; ROM only for a plain cart.
++}  // namespace gbarecomp
++static void rt_fast_refresh() {
++    using gbarecomp::g_active_bus;
++    gba::GbaBus* bus = g_active_bus;
++    const bool ram = bus && !bus->has_write_observer() && !g_runtime_bus_read_override &&
++                     !g_session_execution && !g_runtime_shadow_tick;
++    g_rt.mem_fast = ram ? 1u : 0u;
++    g_rt.ewram = bus ? bus->ewram_ptr() : nullptr;
++    g_rt.iwram = bus ? bus->iwram_ptr() : nullptr;
++    g_rt.rom = bus ? bus->rom_ptr() : nullptr;
++    g_rt.rom_size = bus ? static_cast<uint32_t>(bus->rom_size()) : 0u;
++    g_rt.rom_fast = (ram && g_rt.rom && !bus->matrix().active() && !bus->gpio().active() &&
++                     !bus->save().eeprom_enabled() && !gba::g_rom_read16_override &&
++                     !gba::g_rom_read32_override) ? 1u : 0u;
++}
++namespace gbarecomp {
++
++
+ void set_active_bus(gba::GbaBus* bus) {
+     g_active_bus = bus;
++    rt_fast_refresh();
++    runtime_fastpath_invalidate();
+     if (bus) {
+         bus->bind_wait_table(&g_runtime_waits);
+     } else if (gba::GbaBus* owner = gba::GbaBus::wait_table_owner()) {
+@@ -545,6 +587,7 @@ struct DeviceTickGuard {
+ 
+ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+     DeviceTickGuard _dtg;
++    runtime_fastpath_invalidate();
+     // Stage 2: materializing device state can raise IF, advance the PPU phase,
+     // run timed DMA into watched RAM, etc. Any of these can change a polled
+     // value or the timing rules, so it disturbs an in-flight idle proof.
+@@ -646,8 +689,7 @@ static inline void cyc_probe(const char* what, uint32_t amt) {
+ // (tick_devices) and reschedules. tick_devices chunks internally to exact
+ // sub-event boundaries, so materializing a batched delta is bit-identical to
+ // per-instruction ticking — at a fraction of the call overhead.
+-static unsigned long long g_pending_cycles = 0;
+-static long long          g_event_budget   = 0;
++// g_pending_cycles and g_event_budget live in g_rt (fast-path state, above).
+ 
+ static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+     uint32_t h  = ppu->cycles_until_next_event();
+@@ -709,6 +751,7 @@ extern "C" void runtime_mmio_catch_up(void) {
+ // Recompute the next-event horizon after a config-changing MMIO write (timer
+ // reload/control, DISPSTAT, DMA registers, etc. move the next event).
+ extern "C" void runtime_resync_horizon(void) {
++    runtime_fastpath_invalidate();
+     if (g_session_execution) return; // DMA cycle debt is collected by the owner
+     // Device stores are suppressed by the shadow transaction's bus observer.
+     // Do not drain DMA or rewrite the real scheduler horizon for that rejected
+@@ -723,18 +766,31 @@ extern "C" void runtime_resync_horizon(void) {
+     cyc_probe("resync", 0);
+     drain_dma_steal(bus, ppu);
+     recompute_event_budget(bus, ppu);
++    // The write may have unmasked a pending IRQ: let the next tick take it.
++    if ((g_cpu.cpsr & CPSR_I_BIT) == 0 && bus->io().irq_pending()) g_event_budget = 0;
+ }
+ 
+ extern "C" void runtime_tick(uint32_t cycles) {
+-    if (g_session_execution) { g_runtime_cycles += cycles; return; }
++    // Session / shadow execution keep the budget at zero: every tick lands here.
++    if (g_session_execution) { g_event_budget = 0; g_runtime_cycles += cycles; return; }
+     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
+     // cycle cost (for the cycle diff); the interpreter pass already pumped the
+     // devices / delivered IRQs for this window, so do nothing else here.
+-    if (g_runtime_shadow_tick) { g_runtime_shadow_cycles += cycles; return; }
++    if (g_runtime_shadow_tick) { g_event_budget = 0; g_runtime_shadow_cycles += cycles; return; }
+ 
+     auto* bus = gbarecomp::g_active_bus;
+     auto* ppu = gbarecomp::g_active_ppu;
+     if (!bus || !ppu || cycles == 0) return;
++    // On the way out: an IRQ still takeable keeps the next tick on this path
++    // (the inline tick does not check IRQs), and the bus fast flags follow
++    // any observer/override change.
++    struct FastPathExit {
++        gba::GbaBus* bus;
++        ~FastPathExit() {
++            if ((g_cpu.cpsr & CPSR_I_BIT) == 0 && bus->io().irq_pending()) g_event_budget = 0;
++            rt_fast_refresh();
++        }
++    } fast_path_exit{bus};
+ 
+     // Some software renderers execute millions of guest instructions before
+     // reaching a GBA frame boundary. Downsample the wall-clock check so native
+@@ -742,7 +798,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
+     // instruction.
+     if (g_host_service_hook) {
+         static uint32_t service_tick_divider = 0;
+-        if ((++service_tick_divider & 0x3FFFu) == 0) {
++        if ((++service_tick_divider & 0xFFu) == 0) {
+             static auto last_service = std::chrono::steady_clock::now();
+             const auto now = std::chrono::steady_clock::now();
+             if (now - last_service >= std::chrono::milliseconds(8)) {
+@@ -990,7 +1046,33 @@ void runtime_set_vblank_input_hook(std::function<void()> h) {
+     g_vblank_input_hook = std::move(h);
+ }
+ 
++static bool should_yield_full(void);
++static bool yield_on_vblank_enabled() {
++    static const bool on = [] {
++        const char* e = std::getenv("GBARECOMP_YIELD_ON_VBLANK");
++        return !(e && e[0] == '0' && e[1] == '\0');
++    }();
++    return on;
++}
++static bool hang_watchdog_enabled() {
++    static const bool on = [] {
++        const char* e = std::getenv("GBARECOMP_HANG_WATCHDOG");
++        return e && e[0] != '\0' && e[0] != '0';
++    }();
++    return on;
++}
+ extern "C" bool runtime_should_yield(void) {
++    const bool yield = should_yield_full();
++    gba::GbaBus* bus = gbarecomp::g_active_bus;
++    g_rt.yield_slow = (g_session_execution || g_runtime_force_interp_hook || g_frame_present_quit ||
++                       !bus || bus->io().halted() || hang_watchdog_enabled() ||
++                       g_runtime_break_pc != 0u ||
++                       (yield_on_vblank_enabled() &&
++                        g_runtime_vblank_starts != g_runtime_yielded_vblank_start)) ? 1u : 0u;
++    return yield;
++}
++
++static bool should_yield_full(void) {
+     if (g_session_execution) {
+         if (gbarecomp::runtime_dispatch_suspended()) return true;
+         auto* bus = gbarecomp::g_active_bus;
+@@ -1161,9 +1243,12 @@ void runtime_restore_timing_context(const RuntimeTimingContext& in) {
+     g_vcount_spin_progress = 0;
+     ++g_idle_disturb_epoch;
+     ++g_runtime_state_epoch;
++    runtime_fastpath_invalidate();
+ }
+ void runtime_session_execution(bool enabled) {
+     g_session_execution = enabled;
++    runtime_fastpath_invalidate();
++    rt_fast_refresh();
+     g_session_instruction_started = false;
+     g_session_slice = false;
+ }

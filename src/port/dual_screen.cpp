@@ -13,6 +13,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -64,6 +65,7 @@ enum class Tab { Map, Status, Settings };
 
 enum class Setting {
     TopScale, Filter, Volume, MenusBelow, SwapAB, FrameSkip, Turbo, ShowFps, ResumeAfterSleep,
+    CalibrateTouch,
     SaveState, LoadState, Language, Quit, Count
 };
 
@@ -111,6 +113,11 @@ struct State {
     // Status snapshot for redraw decisions.
     std::uint32_t status_hash = 0;
 
+    // Touch calibration: -1 off, else the cross being shown (0..2).
+    int calib_step = -1;
+    float calib_raw[3][2] = {};
+    Uint32 calib_until = 0;
+
     // Settings interaction.
     Setting armed = Setting::Count;   // double-tap confirmation
     Uint32 armed_until = 0;
@@ -129,6 +136,7 @@ struct State {
     int fps_frames = 0;
     float fps = 0.0f;
     bool perf_log = false;
+    bool touch_debug = false;  // HOD_TOUCH_DEBUG=1: log every tap
     double perf_bottom_ms = 0.0;
     double perf_bottom_max_ms = 0.0;
     int perf_samples = 0;
@@ -435,11 +443,11 @@ constexpr SettingRow kSettingRows[] = {
     {Setting::Volume, Str::Volume},        {Setting::MenusBelow, Str::MenusBelow},
     {Setting::SwapAB, Str::SwapAB},        {Setting::FrameSkip, Str::FrameSkip},
     {Setting::Turbo, Str::Turbo},          {Setting::ShowFps, Str::ShowFps},
-    {Setting::ResumeAfterSleep, Str::ResumeAfterSleep},
+    {Setting::ResumeAfterSleep, Str::ResumeAfterSleep}, {Setting::CalibrateTouch, Str::CalibrateTouch},
     {Setting::SaveState, Str::SaveState},  {Setting::LoadState, Str::LoadState},
     {Setting::Language, Str::Language},    {Setting::Quit, Str::Quit},
 };
-constexpr int kRowH = 12;  // 13 rows in the 160 px content area
+constexpr int kRowH = 11;  // 14 rows in the 160 px content area
 constexpr int kRowsY = kContentY + 2;
 
 Rect setting_rect(int index) { return {2, kRowsY + index * kRowH, kCanvasW - 4, kRowH - 1}; }
@@ -482,17 +490,17 @@ void draw_settings_tab() {
         const bool armed = g->armed == row.id && now < g->armed_until;
         if (i & 1) g->canvas.blend(r.x, r.y, r.w, r.h, rgb(60, 80, 170), 40);
         const bool action = row.id == Setting::SaveState || row.id == Setting::LoadState ||
-                            row.id == Setting::Quit;
+                            row.id == Setting::Quit || row.id == Setting::CalibrateTouch;
         if (armed) g->canvas.blend(r.x, r.y, r.w, r.h, rgb(200, 60, 60), 110);
-        g->canvas.text(r.x + 4, r.y + 3, t(row.label), action ? kGold : kText);
+        g->canvas.text(r.x + 4, r.y + 2, t(row.label), action ? kGold : kText);
         if (armed) {
-            g->canvas.text(r.x + r.w - 4, r.y + 3, t(Str::TapAgain), kText, Align::Right);
+            g->canvas.text(r.x + r.w - 4, r.y + 2, t(Str::TapAgain), kText, Align::Right);
         } else if (!action) {
             char value[32];
             setting_value(row.id, value, sizeof(value));
-            g->canvas.text(196, r.y + 3, value, kGold, Align::Center);
-            g->canvas.text(160, r.y + 3, "◀", kDim);
-            g->canvas.text(r.x + r.w - 9, r.y + 3, "▶", kDim);
+            g->canvas.text(196, r.y + 2, value, kGold, Align::Center);
+            g->canvas.text(160, r.y + 2, "◀", kDim);
+            g->canvas.text(r.x + r.w - 9, r.y + 2, "▶", kDim);
         }
     }
 }
@@ -506,7 +514,24 @@ void draw_mirror_frame() {
     g->canvas.frame(7, 15, kGbaW + 2, kGbaH + 2, kBorder);
 }
 
+constexpr int kCalibTargets[3][2] = {{48, 60}, {208, 60}, {128, 150}};
+
+void draw_calibration() {
+    g->canvas.panel(0, 0, kCanvasW, kCanvasH, kBgTop, kBgBottom, kBorder);
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%s (%d/3)", t(Str::CalibrateHint), g->calib_step + 1);
+    g->canvas.text(kCanvasW / 2, 92, buf, kText, Align::Center);
+    const int x = kCalibTargets[g->calib_step][0], y = kCalibTargets[g->calib_step][1];
+    g->canvas.fill(x - 10, y, 21, 1, kGold);
+    g->canvas.fill(x, y - 10, 1, 21, kGold);
+    g->canvas.frame(x - 3, y - 3, 7, 7, kGold);
+}
+
 void redraw_ui() {
+    if (g->calib_step >= 0) {
+        draw_calibration();
+        return;
+    }
     if (g->mirroring) {
         draw_mirror_frame();
         return;
@@ -525,6 +550,7 @@ std::uint32_t ui_fingerprint() {
     std::uint32_t h = 2166136261u;
     auto mix = [&](std::uint32_t v) { h = (h ^ v) * 16777619u; };
     mix(static_cast<std::uint32_t>(g->tab));
+    mix(static_cast<std::uint32_t>(g->calib_step + 1));
     mix(static_cast<std::uint32_t>(g->cfg.language));
     mix(g->cfg.show_fps ? static_cast<std::uint32_t>(g->fps) : 0u);
     mix(SDL_GetTicks() < g->toast_until ? 1u : 0u);
@@ -668,6 +694,7 @@ void run_action(Setting id) {
 
 void handle_tap(int x, int y) {
     g->dirty = true;
+    if (g->calib_step >= 0) return;
     if (g->mirroring) return;  // the game's own menu is driven by the buttons
     if (y >= kTabBarY) {
         const int i = std::clamp(x / (kCanvasW / 3), 0, 2);
@@ -688,6 +715,12 @@ void handle_tap(int x, int y) {
             for (int i = 0; i < static_cast<int>(Setting::Count); ++i) {
                 if (!setting_rect(i).contains(x, y)) continue;
                 const Setting id = kSettingRows[i].id;
+                if (id == Setting::CalibrateTouch) {
+                    g->armed = Setting::Count;
+                    g->calib_step = 0;
+                    g->calib_until = SDL_GetTicks() + 20000;
+                    break;
+                }
                 if (id == Setting::SaveState || id == Setting::LoadState || id == Setting::Quit) run_action(id);
                 else {
                     g->armed = Setting::Count;
@@ -699,11 +732,40 @@ void handle_tap(int x, int y) {
     }
 }
 
-bool to_canvas(float wx, float wy, int* cx, int* cy) {
-    if (g->ui_dest.w <= 0 || g->ui_dest.h <= 0) return false;
-    *cx = static_cast<int>((wx - g->ui_dest.x) * kCanvasW / g->ui_dest.w);
-    *cy = static_cast<int>((wy - g->ui_dest.y) * kCanvasH / g->ui_dest.h);
-    return *cx >= 0 && *cy >= 0 && *cx < kCanvasW && *cy < kCanvasH;
+// A touch at window pixel (wx, wy): during calibration it is recorded as is;
+// otherwise the calibrated correction is added and the tap dispatched.
+void touch_at(float wx, float wy) {
+    if (g->ui_dest.w <= 0 || g->ui_dest.h <= 0) return;
+    const float fx = (wx - g->ui_dest.x) * kCanvasW / g->ui_dest.w;
+    const float fy = (wy - g->ui_dest.y) * kCanvasH / g->ui_dest.h;
+    if (g->calib_step >= 0) {
+        g->calib_raw[g->calib_step][0] = fx;
+        g->calib_raw[g->calib_step][1] = fy;
+        g->dirty = true;
+        g->calib_until = SDL_GetTicks() + 20000;
+        if (++g->calib_step < 3) return;
+        float dx = 0.0f, dy = 0.0f;
+        for (int i = 0; i < 3; ++i) {
+            dx += kCalibTargets[i][0] - g->calib_raw[i][0];
+            dy += kCalibTargets[i][1] - g->calib_raw[i][1];
+        }
+        g->cfg.touch_dx = std::clamp(dx / 3.0f, -24.0f, 24.0f);
+        g->cfg.touch_dy = std::clamp(dy / 3.0f, -24.0f, 24.0f);
+        g->calib_step = -1;
+        save_config();
+        std::printf("dual_screen: touch calibrated dx=%.1f dy=%.1f (canvas px)\n", g->cfg.touch_dx,
+                    g->cfg.touch_dy);
+        std::fflush(stdout);
+        show_toast(t(Str::TouchCalibrated));
+        return;
+    }
+    const int cx = static_cast<int>(std::floor(fx + g->cfg.touch_dx));
+    const int cy = static_cast<int>(std::floor(fy + g->cfg.touch_dy));
+    if (g->touch_debug) {
+        std::printf("dual_screen: touch %.0f,%.0f -> canvas %.1f,%.1f -> %d,%d\n", wx, wy, fx, fy, cx, cy);
+        std::fflush(stdout);
+    }
+    handle_tap(std::clamp(cx, 0, kCanvasW - 1), std::clamp(cy, 0, kCanvasH - 1));
 }
 
 void poll_exit_combo() {
@@ -791,7 +853,8 @@ void build_held_top() {
 }
 
 // ---- development aids (environment variables, all off by default) --------
-//   HOD_DEBUG_TAPS="600:40,180;900:120,100"  tap canvas x,y at a frame
+//   HOD_DEBUG_TAPS="600:40,180;900:120,100"  tap canvas x,y at a frame (through
+//       the real touch path, so the touch correction applies)
 //   HOD_DEBUG_DUMP_DIR=/tmp/out HOD_DEBUG_DUMP_EVERY=120
 //       write top_<frame>.ppm / bottom_<frame>.ppm (bottom at canvas size)
 struct DebugTap {
@@ -837,7 +900,8 @@ void write_ppm(const std::string& path, int w, int h, auto pixel) {
 
 void debug_frame(const std::uint8_t* gba_frame, const std::uint8_t* top) {
     for (const DebugTap& tap : g_debug_taps)
-        if (tap.frame == g->frame) handle_tap(tap.x, tap.y);
+        if (tap.frame == g->frame)  // through the real touch path (correction, calibration)
+            touch_at(g->ui_dest.x + (tap.x + 0.5f) * g->ui_scale, g->ui_dest.y + (tap.y + 0.5f) * g->ui_scale);
     if (g_debug_dump_dir.empty() || !g_debug_dump_every || g->frame % g_debug_dump_every) return;
     const std::string n = std::to_string(g->frame);
     auto rgb_at = [](const std::uint8_t* p, int x, int y) {
@@ -862,6 +926,7 @@ void dual_screen_init(const DualScreenOptions& options, const PortConfig& config
     g->cfg = config;
     g->failed = !options.enabled;
     g->perf_log = std::getenv("HOD_PERF_LOG") && std::getenv("HOD_PERF_LOG")[0] == '1';
+    g->touch_debug = std::getenv("HOD_TOUCH_DEBUG") && std::getenv("HOD_TOUCH_DEBUG")[0] == '1';
     debug_init();
     sleep_init();
     // The runtime reads the controller itself; these only restore the saved state.
@@ -905,6 +970,10 @@ const std::uint8_t* dual_screen_present(const std::uint8_t* rgb888, int width, i
             std::fprintf(stderr, "dual_screen: running without the bottom screen\n");
         }
     }
+    if (g->calib_step >= 0 && SDL_GetTicks() > g->calib_until) {  // abandoned
+        g->calib_step = -1;
+        g->dirty = true;
+    }
     if (g->window) present_bottom(rgb888);
 
     const std::uint8_t* top = g->mirroring ? g->held_top.data() : rgb888;
@@ -918,12 +987,7 @@ int dual_screen_event(const void* sdl_event) {
     switch (e->type) {
         case SDL_FINGERDOWN:
             if (e->tfinger.windowID != g->window_id) return 0;
-            {
-                int cx, cy;
-                if (to_canvas(e->tfinger.x * static_cast<float>(g->out_w),
-                              e->tfinger.y * static_cast<float>(g->out_h), &cx, &cy))
-                    handle_tap(cx, cy);
-            }
+            touch_at(e->tfinger.x * static_cast<float>(g->out_w), e->tfinger.y * static_cast<float>(g->out_h));
             return 1;
         case SDL_FINGERUP:
         case SDL_FINGERMOTION:
@@ -931,12 +995,11 @@ int dual_screen_event(const void* sdl_event) {
         case SDL_MOUSEBUTTONDOWN:
             if (e->button.windowID != g->window_id) return 0;
             if (e->button.which != SDL_TOUCH_MOUSEID) {  // a real mouse (development)
-                int cx, cy;
                 int ww = 0, wh = 0;
                 SDL_GetWindowSize(g->window, &ww, &wh);
                 const float sx = ww > 0 ? static_cast<float>(g->out_w) / ww : 1.0f;
                 const float sy = wh > 0 ? static_cast<float>(g->out_h) / wh : 1.0f;
-                if (to_canvas(e->button.x * sx, e->button.y * sy, &cx, &cy)) handle_tap(cx, cy);
+                touch_at(e->button.x * sx, e->button.y * sy);
             }
             return 1;
         case SDL_MOUSEBUTTONUP:

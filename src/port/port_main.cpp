@@ -106,6 +106,8 @@ void quiet_runtime_diagnostics() {
     setenv("GBARECOMP_SESSION_DIAGNOSTICS", "0", 0);
     setenv("GBARECOMP_PRESENT_IN_PLACE", "0", 0);
     setenv("GBARECOMP_HANG_WATCHDOG", "0", 0);
+    // Compose scanlines on a second core (patch 0003); 0 renders inline.
+    setenv("GBARECOMP_PPU_THREAD", "1", 0);
     // Touch on the bottom screen must not turn into mouse input for the game
     // window, and the fullscreen game must not minimize when the bottom
     // window takes focus.

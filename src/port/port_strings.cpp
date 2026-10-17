@@ -39,6 +39,9 @@ constexpr Pair kStrings[] = {
     {"REANUDAR TRAS SUSPENDER", "RESUME AFTER SLEEP"},  // ResumeAfterSleep
     {"SALTO DE FRAMES", "FRAMESKIP"},       // FrameSkip
     {"AUTO", "AUTO"},                       // Auto
+    {"CALIBRAR TÁCTIL", "CALIBRATE TOUCH"},   // CalibrateTouch
+    {"TOCA EL CENTRO DE LA CRUZ", "TAP THE CENTRE OF THE CROSS"},  // CalibrateHint
+    {"TÁCTIL CALIBRADO", "TOUCH CALIBRATED"}, // TouchCalibrated
     {"GUARDAR ESTADO", "SAVE STATE"},       // SaveState
     {"CARGAR ESTADO", "LOAD STATE"},        // LoadState
     {"IDIOMA", "LANGUAGE"},                 // Language

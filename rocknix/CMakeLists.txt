@@ -24,7 +24,11 @@ set(HOD_CPU_FLAGS "-march=armv8.2-a+crc+crypto+dotprod -mtune=cortex-a55" CACHE 
 set(HOD_GUEST_OPT "-O2" CACHE STRING "Optimization level for the recompiled game code")
 
 separate_arguments(_cpu_flags UNIX_COMMAND "${HOD_CPU_FLAGS}")
-add_compile_options(${_cpu_flags} -fno-plt -g0)
+# Non-PIE: generated code touches g_cpu, g_rt and the wait table on every
+# guest instruction; PIE would reach each through the GOT (two loads).
+set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+add_compile_options(${_cpu_flags} -fno-plt -g0 -fno-pie)
+add_link_options(-no-pie)
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 add_link_options(-Wl,--gc-sections -Wl,-O1 -Wl,--as-needed)
@@ -95,6 +99,9 @@ target_include_directories(hod_guest_code PRIVATE
 separate_arguments(_guest_opt UNIX_COMMAND "${HOD_GUEST_OPT}")
 target_compile_options(hod_guest_code PRIVATE ${_guest_opt} -fomit-frame-pointer
     -fno-exceptions -fno-asynchronous-unwind-tables -w)
+# Inline fast paths for the per-instruction runtime calls (patch 0003,
+# armv4t/runtime_guest_fastpath.h): the main CPU saving on the Cortex-A55.
+target_compile_definitions(hod_guest_code PRIVATE GBARECOMP_INLINE_FASTPATH=1)
 
 # ---------------------------------------------------------------------------
 # Port front end + executable.

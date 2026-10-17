@@ -19,6 +19,11 @@ struct PortConfig {
     bool show_fps = false;
     int frame_skip = -1;            // -1 auto, 0 off, 1..2 frames skipped per drawn one
     int map_zoom = 1;               // 1 whole castle, 2 follow the player
+    // Touch correction in bottom-canvas pixels (256x192), added to every tap.
+    // Set by CALIBRAR TÁCTIL; the default lifts taps slightly, as fingers
+    // land a little below the point being aimed at.
+    float touch_dx = 0.0f;
+    float touch_dy = -4.0f;
     Language language = Language::Spanish;
 
     bool load(const std::string& path);

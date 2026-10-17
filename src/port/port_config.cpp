@@ -44,6 +44,8 @@ bool PortConfig::load(const std::string& path) {
         else if (key == "show_fps") show_fps = as_bool(value);
         else if (key == "frame_skip") frame_skip = value == "auto" ? -1 : std::clamp(n, 0, 2);
         else if (key == "map_zoom") map_zoom = std::clamp(n, 1, 2);
+        else if (key == "touch_dx") touch_dx = std::clamp(static_cast<float>(std::atof(value.c_str())), -24.0f, 24.0f);
+        else if (key == "touch_dy") touch_dy = std::clamp(static_cast<float>(std::atof(value.c_str())), -24.0f, 24.0f);
         else if (key == "language") language = value == "en" ? Language::English : Language::Spanish;
     }
     return true;
@@ -66,6 +68,8 @@ bool PortConfig::save(const std::string& path) const {
             << "show_fps=" << (show_fps ? 1 : 0) << "\n"
             << "frame_skip=" << (frame_skip < 0 ? std::string("auto") : std::to_string(frame_skip)) << "\n"
             << "map_zoom=" << map_zoom << "\n"
+            << "touch_dx=" << touch_dx << "\n"
+            << "touch_dy=" << touch_dy << "\n"
             << "language=" << (language == Language::English ? "en" : "es") << "\n";
         if (!out) return false;
     }
