@@ -25,8 +25,8 @@ void pbios_rrr_vram(void);  /* 0x00000134 arm */
 void pbios_rrr_oam(void);  /* 0x00000148 arm */
 void pbios_rrr_sio(void);  /* 0x0000015C arm */
 void pbios_rrr_sound(void);  /* 0x0000017C arm */
-void pbios_rrr_regs(void);  /* 0x00000190 arm */
-void pbios_rrr_done(void);  /* 0x000001F0 arm */
-void pbios_clear(void);  /* 0x000001F8 arm */
-void pbios_soft_reset(void);  /* 0x00000208 arm */
+void pbios_rrr_regs(void);  /* 0x000001A8 arm */
+void pbios_rrr_done(void);  /* 0x00000208 arm */
+void pbios_clear(void);  /* 0x00000210 arm */
+void pbios_soft_reset(void);  /* 0x00000220 arm */
 }  /* extern "C" */

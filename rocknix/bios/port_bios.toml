@@ -8,8 +8,8 @@ entry_pc     = 0x00000000
 static_resume_all = true
 
 [identity]
-sha1 = "65fd8188a406b57ed1dc18751b5422b4f7f388d8"
-md5  = "3cb6226debfd896e1017f7e540c47801"
+sha1 = "9ccdaca50fcefc86da57f81d23401d4798c7e820"
+md5  = "95c1acf6d9b46e2dc0741f72f415c4cb"
 
 [[extra_func]]
 addr = 0x00000000
@@ -107,21 +107,21 @@ mode = "arm"
 name = "pbios_rrr_sound"
 
 [[extra_func]]
-addr = 0x00000190
+addr = 0x000001a8
 mode = "arm"
 name = "pbios_rrr_regs"
 
 [[extra_func]]
-addr = 0x000001f0
+addr = 0x00000208
 mode = "arm"
 name = "pbios_rrr_done"
 
 [[extra_func]]
-addr = 0x000001f8
+addr = 0x00000210
 mode = "arm"
 name = "pbios_clear"
 
 [[extra_func]]
-addr = 0x00000208
+addr = 0x00000220
 mode = "arm"
 name = "pbios_soft_reset"

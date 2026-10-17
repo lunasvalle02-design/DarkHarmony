@@ -147,6 +147,14 @@ from a RAM dump for comparison with the game's map screen.
   display registers, palette and OAM taken at its HBlank (VRAM is read live).
   The frame is latched only after the worker finished it. On the device the
   PPU was ~3 ms of each drawn frame.
+- **Audio at the right rate**: the GBA mixer runs at the SOUNDBIAS rate
+  (32 768 Hz for this game) but the native host path drained it as if it
+  were always 65 536 Hz, so the resampling bridge got half the audio it
+  expected and concealed gaps ~85 % of the time (choppy sound on the device
+  even at a locked 60 fps). Each block is now converted to 65 536 Hz with its
+  real rate (linear interpolation up, averaging down). The launcher logs the
+  bridge state every ~2 s (`GBARECOMP_AUDIO_PROBE=1`: underruns, `stretch`
+  = concealed ms, ring fill).
 - **Audio never blocks the game**: the SDL callback resamples under the bridge
   mutex (up to 7 ms on the device); the producer now uses a try-lock and
   carries the block over to the next frame instead of waiting.

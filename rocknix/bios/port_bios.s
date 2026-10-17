@@ -135,9 +135,15 @@ rrr_sio:
 rrr_sound:
     tst   r0, #0x40
     beq   rrr_regs
-    add   r2, r12, #0x60    @ SOUND1CNT_L..SOUNDCNT_X, FIFOs untouched
-    mov   r3, #0x30
+    add   r2, r12, #0x60    @ SOUND1CNT_L..SOUND4CNT_H, wave RAM untouched
+    mov   r3, #0x20
     bl    clear
+    mov   r11, #0
+    strh  r11, [r12, #0x80]  @ SOUNDCNT_L
+    strh  r11, [r12, #0x82]  @ SOUNDCNT_H
+    strh  r11, [r12, #0x84]  @ SOUNDCNT_X
+    mov   r11, #0x200
+    strh  r11, [r12, #0x88]  @ SOUNDBIAS back to its boot value (bias 0x200)
 rrr_regs:
     tst   r0, #0x80
     beq   rrr_done

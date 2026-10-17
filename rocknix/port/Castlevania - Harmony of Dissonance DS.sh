@@ -50,6 +50,8 @@ ulimit -s 65536 2>/dev/null
 # frame_phase.csv on exit. Both are cheap; comment them out once all is well.
 export HOD_PERF_LOG=1
 export GBARECOMP_FRAME_PHASE="$GAMEDIR/frame_phase.csv"
+# Audio bridge health every ~2 s: underruns, concealed gaps, ring fill.
+export GBARECOMP_AUDIO_PROBE=1
 echo "cpu: governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) cur=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null) max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null) video=${SDL_VIDEODRIVER:-auto}"
 
 # Bottom screen renderer: GPU by default. Uncomment to force software rendering.

@@ -31,10 +31,10 @@ static const GbaSymbol kGbaBiosSymbolMap[] = {
     {0x00000148u, "pbios_rrr_oam"},
     {0x0000015Cu, "pbios_rrr_sio"},
     {0x0000017Cu, "pbios_rrr_sound"},
-    {0x00000190u, "pbios_rrr_regs"},
-    {0x000001F0u, "pbios_rrr_done"},
-    {0x000001F8u, "pbios_clear"},
-    {0x00000208u, "pbios_soft_reset"},
+    {0x000001A8u, "pbios_rrr_regs"},
+    {0x00000208u, "pbios_rrr_done"},
+    {0x00000210u, "pbios_clear"},
+    {0x00000220u, "pbios_soft_reset"},
 };
 static const unsigned kGbaBiosSymbolMapCount = 23;
 

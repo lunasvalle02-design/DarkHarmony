@@ -300,10 +300,10 @@ index c9636af..e1ed739 100644
      BusWriteObserver* exchange_write_observer(BusWriteObserver* obs) {
          BusWriteObserver* previous = write_observer_;
 diff --git a/src/gba/gba_ppu.cpp b/src/gba/gba_ppu.cpp
-index 208ec40..0681fde 100644
+index 208ec40..7619f7b 100644
 --- a/src/gba/gba_ppu.cpp
 +++ b/src/gba/gba_ppu.cpp
-@@ -8,9 +8,20 @@
+@@ -8,9 +8,25 @@
  #include <cstdint>
  #include <cstdio>
  #include <cstring>
@@ -312,6 +312,11 @@ index 208ec40..0681fde 100644
 +#include <chrono>
 +#include <cstdlib>
 +#include <thread>
++#if defined(__linux__)
++#include <sys/resource.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#endif
  
  #include "snapshot.h"
  
@@ -324,7 +329,7 @@ index 208ec40..0681fde 100644
  namespace gba {
  
  // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
-@@ -123,6 +134,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+@@ -123,6 +139,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
      vcount_          = r.u16();
      frame_count_     = r.u64();
      const bool serialized_latch = r.boolean();
@@ -332,7 +337,7 @@ index 208ec40..0681fde 100644
      if (!view_expanded()) {
          // Historical native-width restore path, deliberately unchanged.
          has_latched_fb_ = serialized_latch;
-@@ -166,6 +178,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+@@ -166,6 +183,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
  }
  
  void GbaPpu::reset() {
@@ -340,7 +345,7 @@ index 208ec40..0681fde 100644
      foreign_presentation_internal::clear();
      scanline_ = 0;
      dot_in_scanline_ = 0;
-@@ -828,9 +841,13 @@ void render_scanline_internal(uint8_t* rgb,
+@@ -828,9 +846,13 @@ void render_scanline_internal(uint8_t* rgb,
      // room BG with higher priority may cover the HUD's BG0 cells. Capturing
      // only the explicitly declared source map cells keeps that room terrain
      // out of the foreign frame.
@@ -355,7 +360,7 @@ index 208ec40..0681fde 100644
      const uint16_t backdrop_color = load_u16_le(&pal[0]);
  #if !defined(GBARECOMP_SCANLINE_HLE)
      uint8_t backdrop_rgb[3];
-@@ -2424,6 +2441,102 @@ void GbaPpu::render(uint8_t* rgb,
+@@ -2424,6 +2446,108 @@ void GbaPpu::render(uint8_t* rgb,
  
  #endif
  
@@ -422,14 +427,20 @@ index 208ec40..0681fde 100644
 +    ScanlineWorker() : thread_([this] { run(); }) {}
 +
 +    void run() {
++#if defined(__linux__)
++        // Below the game and the audio callback: it only has to finish each
++        // frame by VBlank.
++        setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 5);
++#endif
 +        unsigned idle = 0;
 +        while (!stop_.load(std::memory_order_acquire)) {
 +            const uint64_t d = done_.load(std::memory_order_relaxed);
 +            if (d == submitted_.load(std::memory_order_acquire)) {
-+                // Lines arrive every ~50 us of guest time while a frame is
-+                // drawn; spin briefly, then nap through VBlank and pauses.
-+                if (++idle < 4096) std::this_thread::yield();
-+                else std::this_thread::sleep_for(std::chrono::microseconds(200));
++                // Lines arrive every few tens of us while a frame is drawn:
++                // yield a little, then nap in short steps (sync() at the
++                // latch waits at most one nap) instead of spinning a core.
++                if (++idle < 64) std::this_thread::yield();
++                else std::this_thread::sleep_for(std::chrono::microseconds(50));
 +                continue;
 +            }
 +            idle = 0;
@@ -458,7 +469,7 @@ index 208ec40..0681fde 100644
  void GbaPpu::render_scanline(uint32_t y,
                               uint16_t dispcnt,
                               const uint8_t* io,
-@@ -2468,6 +2581,10 @@ void GbaPpu::render_scanline(uint32_t y,
+@@ -2468,6 +2592,10 @@ void GbaPpu::render_scanline(uint32_t y,
  
      if (!rasterization_enabled_ || frame_skip_) return;
      if (!view_expanded()) {
@@ -469,7 +480,7 @@ index 208ec40..0681fde 100644
          render_scanline_internal(work_fb_.data(), y, dispcnt,
                                   affine_io.data(), vram, oam, pal,
                                   kScreenWidth, kScreenHeight);
-@@ -2506,11 +2623,13 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
+@@ -2506,11 +2634,13 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
                                 const uint8_t* vram,
                                 const uint8_t* oam,
                                 const uint8_t* pal) {
@@ -483,7 +494,7 @@ index 208ec40..0681fde 100644
      if (rasterization_enabled_ && !frame_skip_)
          std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
      has_latched_fb_ = true;
-@@ -2518,6 +2637,7 @@ void GbaPpu::mark_framebuffer_latched() {
+@@ -2518,6 +2648,7 @@ void GbaPpu::mark_framebuffer_latched() {
  }
  
  void GbaPpu::set_rasterization_enabled(bool enabled) {
@@ -492,7 +503,7 @@ index 208ec40..0681fde 100644
      if (!enabled) {
          std::fill(work_fb_.begin(),work_fb_.end(),0);
 diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
-index 3cee87a..8d2b325 100644
+index 3cee87a..94d65b4 100644
 --- a/src/runtime/host_window.cpp
 +++ b/src/runtime/host_window.cpp
 @@ -471,6 +471,9 @@ struct Backend {
@@ -505,7 +516,20 @@ index 3cee87a..8d2b325 100644
      // FPS readout (DisplayPerf hotkey): presents/sec in the title bar.
      bool         fps_readout = false;
      std::string  title;                 // base window title (readout restores it)
-@@ -2064,9 +2067,19 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+@@ -1936,6 +1939,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
+             cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
+                                                         // recomp warm-up hitch (drains to target)
+             if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
++            std::fprintf(stderr,
++                         "host_window: audio bridge driver=%s device_rate=%d samples=%u "
++                         "target=%.0fms\n",
++                         SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "(unknown)",
++                         got.freq, static_cast<unsigned>(got.samples), cfg.target_ms);
++            std::fflush(stderr);
+             SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
+         }
+     }
+@@ -2064,9 +2073,19 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
      // Producer: append mono frames into the bridge ring. The SDL callback
      // (gba_audio_callback) drains it at the device rate with band-limited
      // resampling + a P-only fill servo — no queue underrun, no hard flush.
@@ -529,7 +553,7 @@ index 3cee87a..8d2b325 100644
      // ── NES-mode crackle probe (measure step) ──────────────────────────
      // GBARECOMP_AUDIO_PROBE=1 reports the BRIDGE's underrun/overflow counters
 diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
-index 54f9991..05d6c00 100644
+index 54f9991..404f447 100644
 --- a/src/runtime/runtime.cpp
 +++ b/src/runtime/runtime.cpp
 @@ -3404,6 +3404,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
@@ -542,6 +566,62 @@ index 54f9991..05d6c00 100644
          if (!args.window) return;
          capture_rewind_point();
          auto ev = win.pump();
+@@ -3741,6 +3744,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+ #if defined(GBARECOMP_WEB_HOST)
+     uint64_t host_audio_state_epoch = g_runtime_state_epoch;
+ #endif
++    int16_t host_audio_convert[4096];  // 2048 samples at 32768 Hz -> 4096
++    int16_t host_audio_prev = 0;
+     auto drain_host_audio = [&]() {
+         int16_t audio_buf[2048];
+ #if defined(GBARECOMP_WEB_HOST)
+@@ -3761,10 +3766,42 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+             }
+         }
+ #else
+-        const auto n = bus.audio().drain_samples(audio_buf, 2048);
+-        if (n && !fast_forward_active) {
+-            gba_mod_audio_mix(audio_buf, n);
+-            win.push_audio_samples(audio_buf, n);
++        // The mixer's rate follows SOUNDBIAS (32768 Hz by default, up to
++        // 262144 Hz) but the host bridge is fed 65536 Hz: convert each block
++        // (linear interpolation up, averaging down). Draining the ring as if
++        // it were always 65536 Hz starved the bridge on 32768 Hz games.
++        for (int budget = 0; budget < 16; ++budget) {
++            uint32_t rate = 0;
++            const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
++            if (!n) break;
++            if (fast_forward_active) continue;
++            int16_t* out = audio_buf;
++            std::size_t out_n = n;
++            if (rate == 32768u) {
++                out_n = 0;
++                for (std::size_t i = 0; i < n; ++i) {
++                    host_audio_convert[out_n++] = static_cast<int16_t>(
++                        (static_cast<int32_t>(host_audio_prev) + audio_buf[i]) / 2);
++                    host_audio_convert[out_n++] = audio_buf[i];
++                    host_audio_prev = audio_buf[i];
++                }
++                out = host_audio_convert;
++            } else if (rate > 65536u) {
++                const std::size_t k = rate / 65536u;  // 2 or 4
++                out_n = 0;
++                for (std::size_t i = 0; i + k <= n; i += k) {
++                    int32_t sum = 0;
++                    for (std::size_t j = 0; j < k; ++j) sum += audio_buf[i + j];
++                    host_audio_convert[out_n++] = static_cast<int16_t>(sum / static_cast<int32_t>(k));
++                }
++                if (n) host_audio_prev = audio_buf[n - 1];
++                out = host_audio_convert;
++            } else if (n) {
++                host_audio_prev = audio_buf[n - 1];
++            }
++            if (!out_n) continue;
++            gba_mod_audio_mix(out, out_n);
++            win.push_audio_samples(out, out_n);
+         }
+ #endif
+     };
 diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
 index 9cc47d1..fd16187 100644
 --- a/src/runtime/runtime_bus_bridge.cpp
