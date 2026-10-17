@@ -14,6 +14,8 @@ mkdir -p "$PORT/saves"
 cp "$ROOT/rocknix/port/Castlevania - Harmony of Dissonance DS.sh" "$DIST/ports/"
 cp "$ROOT/rocknix/port/hod/"* "$PORT/"
 cp "$BIN" "$PORT/hod.aarch64"
+# Port BIOS image, unless this build links a BIOS recompiled from your dump.
+[ -d "$ROOT/build/rocknix/generated_bios" ] || cp "$ROOT/rocknix/bios/port_bios.bin" "$PORT/port_bios.bin"
 cp "$ROOT/game.toml" "$PORT/game.toml"
 cp "$ROOT/LICENSE" "$PORT/LICENSE.txt"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$PORT/THIRD_PARTY_NOTICES.md"

@@ -31,7 +31,8 @@ if ! ls "$GAMEDIR"/*.gba >/dev/null 2>&1; then
   echo "Copy your Castlevania - Harmony of Dissonance (USA) ROM here (8 MiB, SHA-1 b90da0d9...)."
   exit 1
 fi
-if [ ! -f gba_bios.bin ] && [ ! -f bios/gba_bios.bin ]; then
+# Builds with the port BIOS ship port_bios.bin; retail-BIOS builds need your dump.
+if [ ! -f port_bios.bin ] && [ ! -f gba_bios.bin ] && [ ! -f bios/gba_bios.bin ]; then
   echo "ERROR: gba_bios.bin is missing from $GAMEDIR"
   exit 1
 fi
@@ -44,8 +45,12 @@ export SDL_VIDEO_WAYLAND_WMCLASS=hod
 # Guest call chains use the host stack (the binary also raises this itself).
 ulimit -s 65536 2>/dev/null
 
-# Performance line in log.txt every ~5 s (fps and bottom-screen time).
-# export HOD_PERF_LOG=1
+# Performance line in log.txt every ~5 s (fps and bottom-screen time), and a
+# per-frame breakdown (guest, render, present, audio, input, pacing) written to
+# frame_phase.csv on exit. Both are cheap; comment them out once all is well.
+export HOD_PERF_LOG=1
+export GBARECOMP_FRAME_PHASE="$GAMEDIR/frame_phase.csv"
+echo "cpu: governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) cur=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null) max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null) video=${SDL_VIDEODRIVER:-auto}"
 
 # Bottom screen renderer: GPU by default. Uncomment to force software rendering.
 # export HOD_BOTTOM_RENDERER=software
@@ -53,9 +58,25 @@ ulimit -s 65536 2>/dev/null
 # Single-screen devices: run without the bottom window.
 # export HOD_SINGLE_SCREEN=1
 
+# The recompiled game needs the big clocks: run on the performance governor
+# and put the previous one back on exit. HOD_KEEP_GOVERNOR=1 leaves it alone.
+saved_govs=""
+if [ "${HOD_KEEP_GOVERNOR:-0}" != "1" ]; then
+  for g in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+    [ -w "$g" ] || continue
+    saved_govs="$saved_govs $g=$(cat "$g")"
+    echo performance > "$g" 2>/dev/null
+  done
+  echo "cpu: governor now $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+fi
+
 ./hod.aarch64
 rc=$?
 echo "hod exited with code $rc"
+
+for entry in $saved_govs; do
+  echo "${entry#*=}" > "${entry%%=*}" 2>/dev/null
+done
 
 [ -n "$controlfolder" ] && unset SDL_GAMECONTROLLERCONFIG
 exit $rc

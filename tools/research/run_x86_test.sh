@@ -1,18 +1,18 @@
 #!/bin/sh
 # Native x86_64 build of the ROCKNIX port and a headless end-to-end run with
-# the user's ROM, a stand-in IRQ-only BIOS and a scripted new game. Dumps the
+# the user's ROM, the port BIOS and a scripted new game. Dumps the
 # top and bottom screens (PPM -> PNG) to /out. Run in the hod-x86-test image:
 #   docker run --rm -v <repo>:/work -v <rom dir>:/romdir:ro -v <out>:/out hod-x86-test \
 #     sh tools/research/run_x86_test.sh
 set -eu
 cmake -S rocknix -B ${XBUILD:-build/x86} -G Ninja -DHOD_CPU_FLAGS="-march=x86-64-v2" -DHOD_GUEST_OPT=-O1 \
-  -DGBARECOMP_TOMLPP_INCLUDE_DIR=/work/external/tomlplusplus -DHOD_SPLIT_DIR=/work/build/rocknix/guest >/dev/null
+  -DGBARECOMP_TOMLPP_INCLUDE_DIR=/work/external/tomlplusplus -DHOD_SPLIT_DIR=/work/build/rocknix/guest -DHOD_GENERATED_BIOS_DIR= >/dev/null
 cmake --build ${XBUILD:-build/x86} --target hod --parallel "${JOBS:-4}" | tail -2
 
 P=/tmp/port; rm -rf $P; mkdir -p $P
 cp ${XBUILD:-build/x86}/hod.x86_64 game.toml $P/
 cp /romdir/*.gba $P/
-python3 tools/research/make_test_bios.py $P/gba_bios.bin
+cp rocknix/bios/port_bios.bin $P/
 python3 tools/research/make_replay.py $P/replay.txt
 rm -f /out/*.ppm /out/top_*.png /out/bottom_*.png
 

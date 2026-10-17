@@ -63,7 +63,7 @@ Rgb map_color(std::uint8_t index) {
 enum class Tab { Map, Status, Settings };
 
 enum class Setting {
-    TopScale, Filter, Volume, MenusBelow, SwapAB, Turbo, ShowFps, ResumeAfterSleep,
+    TopScale, Filter, Volume, MenusBelow, SwapAB, FrameSkip, Turbo, ShowFps, ResumeAfterSleep,
     SaveState, LoadState, Language, Quit, Count
 };
 
@@ -83,6 +83,8 @@ struct State {
     Uint32 window_id = 0;
     bool failed = false;
     bool needs_layout = true;
+    std::uint64_t last_present = 0;  // frame of the last bottom present
+    std::uint64_t present_burst_until = 0;
     int out_w = 0, out_h = 0;
     SDL_Rect ui_dest{};      // canvas on the bottom output
     float ui_scale = 1.0f;
@@ -222,6 +224,9 @@ void update_layout() {
     g->ui_dest.x = (g->out_w - g->ui_dest.w) / 2;
     g->ui_dest.y = (g->out_h - g->ui_dest.h) / 2;
     g->dirty = true;
+    // Present every frame for a moment: the compositor may still be moving
+    // or resizing the window and drop what was shown before.
+    g->present_burst_until = g->frame + 60;
     std::printf("dual_screen: output %dx%d, canvas %dx%d at %d,%d\n", g->out_w, g->out_h, g->ui_dest.w,
                 g->ui_dest.h, g->ui_dest.x, g->ui_dest.y);
     std::fflush(stdout);
@@ -255,6 +260,17 @@ void draw_header(const char* title, const char* right) {
     if (right) g->canvas.text(kCanvasW - 5, 4, right, kText, Align::Right);
 }
 
+// Shown on the map and status tabs before the castle (title screen, file
+// select, prologue), where there is nothing to map yet.
+void draw_title_card() {
+    g->canvas.panel(0, kContentY, kCanvasW, kContentH, kBgTop, kBgBottom, rgb(30, 36, 80));
+    const int cy = kContentY + kContentH / 2;
+    g->canvas.text(kCanvasW / 2, cy - 34, "CASTLEVANIA", kGold, Align::Center, 3);
+    g->canvas.text(kCanvasW / 2, cy - 8, "HARMONY OF DISSONANCE", kText, Align::Center);
+    g->canvas.fill(48, cy + 6, kCanvasW - 96, 1, rgb(90, 100, 170));
+    g->canvas.text(kCanvasW / 2, cy + 16, t(Str::NotInCastle), kDim, Align::Center);
+}
+
 hod::MapView effective_view(const hod::MapPosition* pos) {
     switch (g->map_view_choice) {
         case 1: return hod::MapView::CastleA;
@@ -276,13 +292,13 @@ void draw_map_tab() {
     const Str title = view == hod::MapView::CastleB ? Str::CastleB
                     : view == hod::MapView::Both    ? Str::BothCastles
                                                     : Str::CastleA;
-    draw_header(t(title), in_castle ? right : nullptr);
+    draw_header(t(in_castle ? title : Str::MapTitle), in_castle ? right : nullptr);
 
-    g->canvas.fill(0, kContentY, kCanvasW, kContentH, map_color(0));
     if (!in_castle) {
-        g->canvas.text(kCanvasW / 2, kContentY + kContentH / 2 - 4, t(Str::NotInCastle), kDim, Align::Center);
+        draw_title_card();
         return;
     }
+    g->canvas.fill(0, kContentY, kCanvasW, kContentH, map_color(0));
     const std::uint32_t sig = hod::map_signature(src);
     if (!g->map_valid || sig != g->map_sig || view != g->drawn_view) {
         hod::render_map(src, view, g->map_px.data());
@@ -350,11 +366,11 @@ void draw_status_tab() {
     char clock[32];
     std::snprintf(clock, sizeof(clock), "%u:%02u:%02u", secs / 3600, (secs / 60) % 60, secs % 60);
     draw_header(t(Str::Status), in_castle ? clock : nullptr);
-    g->canvas.panel(0, kContentY, kCanvasW, kContentH, kBgTop, kBgBottom, rgb(30, 36, 80));
     if (!in_castle) {
-        g->canvas.text(kCanvasW / 2, kContentY + kContentH / 2 - 4, t(Str::NotInCastle), kDim, Align::Center);
+        draw_title_card();
         return;
     }
+    g->canvas.panel(0, kContentY, kCanvasW, kContentH, kBgTop, kBgBottom, rgb(30, 36, 80));
 
     char buf[64];
     int y = kContentY + 8;
@@ -417,12 +433,13 @@ struct SettingRow {
 constexpr SettingRow kSettingRows[] = {
     {Setting::TopScale, Str::TopScreen},   {Setting::Filter, Str::Filter},
     {Setting::Volume, Str::Volume},        {Setting::MenusBelow, Str::MenusBelow},
-    {Setting::SwapAB, Str::SwapAB},        {Setting::Turbo, Str::Turbo},
-    {Setting::ShowFps, Str::ShowFps},      {Setting::ResumeAfterSleep, Str::ResumeAfterSleep},
+    {Setting::SwapAB, Str::SwapAB},        {Setting::FrameSkip, Str::FrameSkip},
+    {Setting::Turbo, Str::Turbo},          {Setting::ShowFps, Str::ShowFps},
+    {Setting::ResumeAfterSleep, Str::ResumeAfterSleep},
     {Setting::SaveState, Str::SaveState},  {Setting::LoadState, Str::LoadState},
     {Setting::Language, Str::Language},    {Setting::Quit, Str::Quit},
 };
-constexpr int kRowH = 13;
+constexpr int kRowH = 12;  // 13 rows in the 160 px content area
 constexpr int kRowsY = kContentY + 2;
 
 Rect setting_rect(int index) { return {2, kRowsY + index * kRowH, kCanvasW - 4, kRowH - 1}; }
@@ -442,6 +459,11 @@ void setting_value(Setting id, char* out, std::size_t n) {
         case Setting::Volume: std::snprintf(out, n, "%d%%", c.volume); break;
         case Setting::MenusBelow: yes_no(c.menus_on_bottom); break;
         case Setting::SwapAB: yes_no(c.swap_ab); break;
+        case Setting::FrameSkip:
+            if (c.frame_skip < 0) std::snprintf(out, n, "%s", t(Str::Auto));
+            else if (c.frame_skip == 0) std::snprintf(out, n, "%s", t(Str::No));
+            else std::snprintf(out, n, "%d", c.frame_skip);
+            break;
         case Setting::Turbo: yes_no(g->turbo); break;
         case Setting::ShowFps: yes_no(c.show_fps); break;
         case Setting::ResumeAfterSleep: yes_no(c.resume_after_sleep); break;
@@ -530,11 +552,15 @@ void present_bottom(const std::uint8_t* gba_frame) {
     const auto t0 = std::chrono::steady_clock::now();
     if (g->needs_layout) update_layout();
 
-    // Redraw the canvas only when something visible changed (UI at <= 30 Hz).
+    // Redraw the canvas only when something visible changed (UI at <= 30 Hz),
+    // but present at least twice a second (and every frame right after the
+    // window appears or changes size), so a buffer the compositor dropped
+    // never leaves the bottom screen black.
     const std::uint32_t fp = ui_fingerprint();
     const bool ui_changed = g->dirty || fp != g->status_hash;
-    if (!g->mirroring && !ui_changed) return;
-    if (!g->mirroring && (g->frame & 1)) return;
+    const bool keepalive = g->frame < g->present_burst_until || g->frame - g->last_present >= 30;
+    if (!g->mirroring && !ui_changed && !keepalive) return;
+    if (!g->mirroring && !keepalive && (g->frame & 1)) return;
 
     if (ui_changed) {
         redraw_ui();
@@ -553,6 +579,7 @@ void present_bottom(const std::uint8_t* gba_frame) {
         SDL_RenderCopy(g->renderer, g->game_tex, nullptr, &dst);
     }
     SDL_RenderPresent(g->renderer);
+    g->last_present = g->frame;
 
     if (g->perf_log) {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -563,6 +590,8 @@ void present_bottom(const std::uint8_t* gba_frame) {
 }
 
 // ---- input --------------------------------------------------------------
+
+int frame_skip_request(int setting) { return setting < 0 ? 100 : setting; }
 
 void apply_setting(Setting id, int dir) {
     PortConfig& c = g->cfg;
@@ -589,6 +618,15 @@ void apply_setting(Setting id, int dir) {
             c.swap_ab = !c.swap_ab;
             host_request(HostRequest::SwapAB, c.swap_ab ? 1 : 0);
             break;
+        case Setting::FrameSkip: {
+            // Cycle auto -> off -> 1 -> 2.
+            static const int order[] = {-1, 0, 1, 2};
+            int i = 0;
+            while (i < 3 && order[i] != c.frame_skip) ++i;
+            c.frame_skip = order[(i + (dir > 0 ? 1 : 3)) % 4];
+            host_request(HostRequest::SetFrameSkip, frame_skip_request(c.frame_skip));
+            break;
+        }
         case Setting::Turbo:
             g->turbo = !g->turbo;
             host_request(HostRequest::FastForward, g->turbo ? 1 : 0);
@@ -829,6 +867,7 @@ void dual_screen_init(const DualScreenOptions& options, const PortConfig& config
     // The runtime reads the controller itself; these only restore the saved state.
     host_request(HostRequest::SwapAB, config.swap_ab ? 1 : 0);
     host_request(HostRequest::SetLinearFilter, config.smooth_filter ? 1 : 0);
+    host_request(HostRequest::SetFrameSkip, frame_skip_request(config.frame_skip));
 }
 
 const std::uint8_t* dual_screen_present(const std::uint8_t* rgb888, int width, int height) {

@@ -42,6 +42,7 @@ bool PortConfig::load(const std::string& path) {
         else if (key == "swap_ab") swap_ab = as_bool(value);
         else if (key == "resume_after_sleep") resume_after_sleep = as_bool(value);
         else if (key == "show_fps") show_fps = as_bool(value);
+        else if (key == "frame_skip") frame_skip = value == "auto" ? -1 : std::clamp(n, 0, 2);
         else if (key == "map_zoom") map_zoom = std::clamp(n, 1, 2);
         else if (key == "language") language = value == "en" ? Language::English : Language::Spanish;
     }
@@ -63,6 +64,7 @@ bool PortConfig::save(const std::string& path) const {
             << "swap_ab=" << (swap_ab ? 1 : 0) << "\n"
             << "resume_after_sleep=" << (resume_after_sleep ? 1 : 0) << "\n"
             << "show_fps=" << (show_fps ? 1 : 0) << "\n"
+            << "frame_skip=" << (frame_skip < 0 ? std::string("auto") : std::to_string(frame_skip)) << "\n"
             << "map_zoom=" << map_zoom << "\n"
             << "language=" << (language == Language::English ? "en" : "es") << "\n";
         if (!out) return false;

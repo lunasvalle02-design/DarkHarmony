@@ -37,6 +37,8 @@ constexpr Pair kStrings[] = {
     {"TURBO", "TURBO"},                     // Turbo
     {"MOSTRAR FPS", "SHOW FPS"},            // ShowFps
     {"REANUDAR TRAS SUSPENDER", "RESUME AFTER SLEEP"},  // ResumeAfterSleep
+    {"SALTO DE FRAMES", "FRAMESKIP"},       // FrameSkip
+    {"AUTO", "AUTO"},                       // Auto
     {"GUARDAR ESTADO", "SAVE STATE"},       // SaveState
     {"CARGAR ESTADO", "LOAD STATE"},        // LoadState
     {"IDIOMA", "LANGUAGE"},                 // Language

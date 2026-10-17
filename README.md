@@ -37,8 +37,8 @@ screen on the bottom touch screen. Build with Docker:
 .\rocknix.ps1 deploy -DeviceIp 192.168.1.50
 ```
 
-See [docs/ROCKNIX.md](docs/ROCKNIX.md) for controls, settings, the optional
-native BIOS and how the port works.
+See [docs/ROCKNIX.md](docs/ROCKNIX.md) for controls, settings, performance and
+how the port works. It needs only the ROM: the port ships its own small BIOS.
 
 ---
 

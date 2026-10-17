@@ -1,0 +1,239 @@
+diff --git a/src/gba/gba_ppu.cpp b/src/gba/gba_ppu.cpp
+index 8e06758..208ec40 100644
+--- a/src/gba/gba_ppu.cpp
++++ b/src/gba/gba_ppu.cpp
+@@ -2466,7 +2466,7 @@ void GbaPpu::render_scanline(uint32_t y,
+         state.y += pd;
+     }
+ 
+-    if (!rasterization_enabled_) return;
++    if (!rasterization_enabled_ || frame_skip_) return;
+     if (!view_expanded()) {
+         render_scanline_internal(work_fb_.data(), y, dispcnt,
+                                  affine_io.data(), vram, oam, pal,
+@@ -2511,7 +2511,7 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
+ }
+ 
+ void GbaPpu::mark_framebuffer_latched() {
+-    if (rasterization_enabled_)
++    if (rasterization_enabled_ && !frame_skip_)
+         std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
+     has_latched_fb_ = true;
+     if (presentation_) presentation_->frame_ready();
+diff --git a/src/gba/gba_ppu.h b/src/gba/gba_ppu.h
+index 5c521b9..39e9935 100644
+--- a/src/gba/gba_ppu.h
++++ b/src/gba/gba_ppu.h
+@@ -61,6 +61,11 @@ public:
+     // in a network match uses this policy; only its host mirror draws pixels.
+     void set_rasterization_enabled(bool enabled);
+     bool rasterization_enabled() const { return rasterization_enabled_; }
++    // Frameskip (host configuration, not serialized): while set, scanlines are
++    // not composed and the latched frame keeps the last rendered image. Guest
++    // timing, IRQs and affine reference updates are unaffected.
++    void set_frame_skip(bool skip) { frame_skip_ = skip; }
++    bool frame_skip() const { return frame_skip_; }
+     // Compose a separate surface using the source's pre-scanline affine
+     // registers, including HBlank DMA reloads. Does not advance either PPU.
+     void render_presentation_scanline(const GbaPpu& source, uint32_t y,
+@@ -191,6 +196,7 @@ private:
+     friend class SimulationStateCodec;
+     PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
+     bool rasterization_enabled_ = true; // host configuration, not serialized
++    bool frame_skip_ = false;           // host configuration, not serialized
+     uint32_t scanline_        = 0;   // 0..227
+     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
+     uint32_t cycle_in_dot_    = 0;   // 0..3
+diff --git a/src/runtime/host_platform.cpp b/src/runtime/host_platform.cpp
+index 99c7813..0afcb9d 100644
+--- a/src/runtime/host_platform.cpp
++++ b/src/runtime/host_platform.cpp
+@@ -53,9 +53,11 @@ void FramePacer::reset() {
+ void FramePacer::wait_for_next_frame() {
+     if (uncapped_) {
+         next_ = clock::now();  // keep the deadline current for re-cap
++        late_ = false;
+         return;
+     }
+     clock::time_point now = clock::now();
++    late_ = now > next_;
+     // If we've fallen more than one whole frame behind, resync instead
+     // of trying to replay the lost time (avoids a catch-up death spiral
+     // after a hitch or a breakpoint pause).
+diff --git a/src/runtime/host_platform.h b/src/runtime/host_platform.h
+index 2b48ab3..60ab49f 100644
+--- a/src/runtime/host_platform.h
++++ b/src/runtime/host_platform.h
+@@ -52,11 +52,16 @@ public:
+     void set_uncapped(bool on) { uncapped_ = on; }
+     bool uncapped() const { return uncapped_; }
+ 
++    // True when the last wait_for_next_frame() found the deadline already
++    // passed: the frame took longer than its period (drives auto frameskip).
++    bool late() const { return late_; }
++
+ private:
+     using clock = std::chrono::steady_clock;
+     std::chrono::nanoseconds period_{};
+     clock::time_point next_{};
+     bool uncapped_ = false;
++    bool late_ = false;
+     bool raised_timer_res_ = false;
+     // HP-002: Windows high-resolution waitable timer (HANDLE, void* here to
+     // keep windows.h out of this header). sleep_until quantizes to the 64 Hz
+diff --git a/src/runtime/host_window.cpp b/src/runtime/host_window.cpp
+index 3797085..3cee87a 100644
+--- a/src/runtime/host_window.cpp
++++ b/src/runtime/host_window.cpp
+@@ -340,7 +340,7 @@ HostWindow* g_haptic_window = nullptr;
+ std::atomic<bool> g_settings_menu_requested{false};
+ // host_request(): one pending value per kind (-1 = none), consumed by pump.
+ std::atomic<int> g_host_requests[static_cast<int>(HostRequest::Count)] = {
+-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
++    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+ // Level-triggered state set through host_request.
+ bool g_request_fast_forward = false;
+ std::atomic<bool> g_swap_ab{false};
+@@ -2770,6 +2770,7 @@ HostWindow::Events HostWindow::pump() {
+     if (take_request(HostRequest::SuspendState) >= 0) ev.suspend_state = true;
+     if (take_request(HostRequest::Resumed) >= 0) ev.resumed = true;
+     if ((req = take_request(HostRequest::AudioEnabled)) >= 0) set_audio_enabled(req != 0);
++    if ((req = take_request(HostRequest::SetFrameSkip)) >= 0) ev.frame_skip = req;
+ 
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+diff --git a/src/runtime/host_window.h b/src/runtime/host_window.h
+index 470896f..6310bc2 100644
+--- a/src/runtime/host_window.h
++++ b/src/runtime/host_window.h
+@@ -233,6 +233,7 @@ public:
+         bool     flush_save = false;
+         bool     suspend_state = false;
+         bool     resumed = false;
++        int      frame_skip = -1;  // host_request(SetFrameSkip), -1 = unchanged
+     };
+     Events pump();
+ 
+@@ -281,6 +282,8 @@ enum class HostRequest : int {
+     SuspendState,     // flush the save and write the suspend state
+     Resumed,          // the device woke up: clear marker, reset pacing
+     AudioEnabled,     // value = 0/1
++    SetFrameSkip,     // value = 0 off, 1..3 skip that many frames per drawn one,
++                      // 100 auto (skip up to 2 while the host falls behind)
+     Count
+ };
+ void host_request(HostRequest request, int value = 0);
+diff --git a/src/runtime/runtime.cpp b/src/runtime/runtime.cpp
+index 648dc91..54f9991 100644
+--- a/src/runtime/runtime.cpp
++++ b/src/runtime/runtime.cpp
+@@ -2809,6 +2809,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+     // the Windows timer-resolution bump doesn't apply to headless/TCP
+     // batch runs (which intentionally run uncapped).
+     std::optional<FramePacer> pacer;
++    // Frameskip (host_request SetFrameSkip): 0 off, 1..3 skip that many frames
++    // after each drawn one, 100 auto (skip up to 2 in a row while the pacer
++    // finds frames late). A skipped frame runs the guest normally but is not
++    // rasterized or presented; it is still paced.
++    int frameskip_mode = 0;
++    int frameskip_run = 0;
++    bool frameskip_current = false;
+     // Windowed observe-mode TCP (see Args::tcp_observe_port). Savestate
+     // requests from its thread are executed by the main loop at the next
+     // present, the only point where machine state is consistent.
+@@ -3497,6 +3504,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                          e.c_str());
+             std::fflush(stderr);
+         }
++        if (ev.frame_skip >= 0) frameskip_mode = ev.frame_skip;
+         if (ev.resumed) {
+             clear_suspend_marker();
+             if (pacer) pacer->reset();
+@@ -3797,6 +3805,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+ #endif
+     };
+ 
++    auto frameskip_after_pace = [&]() {
++        bool skip = false;
++        if (!fast_forward_active && frameskip_mode > 0) {
++            skip = frameskip_mode >= 100
++                ? (pacer && pacer->late() && frameskip_run < 2)
++                : frameskip_run < frameskip_mode;
++        }
++        frameskip_run = skip ? frameskip_run + 1 : 0;
++        frameskip_current = skip;
++        ppu.set_frame_skip(skip);
++    };
+     if (args.window) {
+         runtime_set_host_service_hook([&]() { win.service_events(); });
+     }
+@@ -3829,9 +3848,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                 uint64_t fp_t3 = 0;
+                 uint64_t fp_t4 = 0;
+                 if (phase_active) fp_t0 = FramePhaseRing::now_ns();
+-                const bool present_frame = !fast_forward_active ||
++                const bool ff_frame = !fast_forward_active ||
+                     (frame % static_cast<uint64_t>(
+                          fast_forward_multiplier) == 0);
++                const bool present_frame = ff_frame && !frameskip_current;
+                 if (present_frame) {
+                     const bool view_changed = sync_resize_driven_view();
+                     if (ppu.has_latched_framebuffer() && !view_changed) {
+@@ -3860,11 +3880,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                 if (input_replay_requested) apply_input_replay();
+                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
+                 last_presented_frame = frame;
+-                if (present_frame) {
++                if (ff_frame) {
+                     ++frames_presented;
+                     if (args.frames >= 0 && frames_presented >= args.frames)
+                         host_quit = true;
+                     if (pacer) pacer->wait_for_next_frame();
++                    frameskip_after_pace();
+                 }
+                 if (phase_active) {
+                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
+@@ -4223,9 +4244,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                 uint64_t fp_t3 = 0;
+                 uint64_t fp_t4 = 0;
+                 if (phase_active) fp_t0 = FramePhaseRing::now_ns();
+-                const bool present_frame = !fast_forward_active ||
++                const bool ff_frame = !fast_forward_active ||
+                     (frame % static_cast<uint64_t>(
+                          fast_forward_multiplier) == 0);
++                const bool present_frame = ff_frame && !frameskip_current;
+                 if (present_frame) {
+                     const bool view_changed = sync_resize_driven_view();
+                     if (ppu.has_latched_framebuffer() && !view_changed) {
+@@ -4256,7 +4278,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
+                 dispatches_since_pump = 0;
+                 last_presented_frame = frame;
+-                if (present_frame) {
++                if (ff_frame) {
+                     ++frames_presented;
+                     if (args.frames >= 0 && frames_presented >= args.frames) {
+                         host_quit = true;
+@@ -4265,6 +4287,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
+                     // runs N guest frames per one paced host presentation,
+                     // making its selected multiplier independent of monitor Hz.
+                     if (pacer) pacer->wait_for_next_frame();
++                    frameskip_after_pace();
+                 }
+                 if (phase_active) {
+                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
+diff --git a/src/runtime/runtime_bus_bridge.cpp b/src/runtime/runtime_bus_bridge.cpp
+index 044fc13..9cc47d1 100644
+--- a/src/runtime/runtime_bus_bridge.cpp
++++ b/src/runtime/runtime_bus_bridge.cpp
+@@ -771,7 +771,9 @@ extern "C" void runtime_tick(uint32_t cycles) {
+     // so a DMA-end IRQ or a timer that overflowed during the steal is seen now.
+     drain_dma_steal(bus, ppu);
+ 
+-    if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
++    // CPSR.I first: it is a register load, irq_pending() an out-of-line call
++    // (both side-effect free, so the order does not matter otherwise).
++    if ((g_cpu.cpsr & CPSR_I_BIT) == 0 && bus->io().irq_pending()) {
+         g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;
+         if (bus->io().halted()) {
+             // Wake-from-HALT IRQ latency. The ARM7TDMI does not vector the

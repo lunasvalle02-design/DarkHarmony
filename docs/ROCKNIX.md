@@ -18,7 +18,7 @@ like a Nintendo DS Castlevania.
 | | |
 |:--|:--|
 | Host | Docker (Docker Desktop with WSL2 on Windows). Builds are cross-compiled in `rocknix/docker`. |
-| Game files | Your **Castlevania - Harmony of Dissonance (USA)** ROM (8 MiB, SHA-1 `b90da0d9be0b3a0893cd9e2c399056bcf9579e21`) and a 16 KiB **`gba_bios.bin`** |
+| Game files | Your **Castlevania - Harmony of Dissonance (USA)** ROM (8 MiB, SHA-1 `b90da0d9be0b3a0893cd9e2c399056bcf9579e21`). No BIOS dump is needed: the port ships its own (see [Native BIOS](#native-bios)). |
 | Device | ROCKNIX on an RG DS / RG DS Plus, with SSH enabled for `deploy` |
 
 ### Build and install (Windows / PowerShell)
@@ -31,8 +31,7 @@ like a Nintendo DS Castlevania.
 
 Linux / WSL / macOS: `make -f rocknix.mk image all deploy DEVICE_IP=192.168.1.50`.
 
-Then copy your `.gba` and `gba_bios.bin` into `/storage/roms/ports/hod/` (Samba
-share or SD card) and refresh the game list. Without SSH, copy `dist/ports/*`
+Then copy your `.gba` into `/storage/roms/ports/hod/` (Samba share or SD card) and refresh the game list. Without SSH, copy `dist/ports/*`
 into the `ports` folder by hand. `deploy` never overwrites saves, `hod.cfg` or
 your game files.
 
@@ -59,6 +58,7 @@ your game files.
 | `VOLUMEN` | 0–100 % (left half of the row lowers, right half raises) |
 | `MENÚS ABAJO` | Pause menu and map screen on the bottom screen (top holds the last gameplay frame) |
 | `INTERCAMBIAR A/B` | Swap the face buttons if your controller mapping feels reversed |
+| `SALTO DE FRAMES` | `AUTO` (default: skip drawing up to 2 frames in a row only when a frame runs late), `NO`, `1`, `2`. The game itself always runs every frame |
 | `TURBO` | Uncapped speed while on (not saved) |
 | `MOSTRAR FPS` | Frame rate in the bottom header |
 | `REANUDAR TRAS SUSPENDER` | Also write a suspend state when the device sleeps (resumes there if the battery dies) |
@@ -81,7 +81,7 @@ waits for vsync (the game window owns pacing). The bottom UI is drawn into a
 re-uploaded when what it shows changes (≤ 30 Hz); the mirrored game menu is a
 240x160 texture drawn at 4x at the same position.
 
-### Runtime seams (`patches/gbarecomp/0001-…`)
+### Runtime seams (`patches/gbarecomp/`)
 
 GBARecomp is fetched at a pinned commit and patched with small, game-agnostic
 hooks:
@@ -94,6 +94,9 @@ hooks:
 - `RunOptions::scale_mode` and `host_request()` — thread-safe requests applied
   between frames: quit, save/load state, volume, scale mode, filter, turbo,
   A/B swap, save flush, suspend state, resume and audio pause.
+- `0002`: frameskip (`HostRequest::SetFrameSkip`, `GbaPpu::set_frame_skip`,
+  `FramePacer::late()`), and `runtime_tick` tests CPSR.I before the
+  out-of-line IRQ-pending call it runs after every guest instruction.
 
 ### Game knowledge (`src/port/hod_ram.h`, `hod_map.cpp`)
 
@@ -123,16 +126,42 @@ from a RAM dump for comparison with the game's map screen.
   (`tools/split_shards.py`) into 6 MB units: parallel builds with bounded memory
   and -O2 for the game code (`GUEST_OPT=-O1` lowers it if a build machine
   struggles). The generated code itself is never edited.
-- BIOS HLE (`--bios-hle`): SWIs such as CpuSet, LZ77 and Div run natively.
-- **Optional native BIOS** — the biggest single win. HLE still leaves the IRQ
-  vector, `Halt` and `VBlankIntrWait` to real BIOS code every frame; without a
-  recompiled BIOS that code runs through the interpreter bridge, which was
-  ~55 % of CPU time in an x86 profile. Put your own dump at
-  `rocknix/bios/gba_bios.bin` before building and `build.sh` recompiles it into
-  the binary (`gba_recompile --bios`): uncapped speed went from 148 to 239 fps
-  and interpreted instructions from ~10⁹ to ~2·10⁵ over the same run. Such a
-  binary contains BIOS-derived code: keep it for your own device.
-- `HOD_PERF_LOG=1` in the launcher writes fps and bottom-screen time to `log.txt`.
+- **Native BIOS — the biggest single win.** See below.
+- **Frameskip** (`SALTO DE FRAMES`, patch `0002`): a skipped frame runs the
+  game normally but is neither rasterized by the PPU nor presented. `AUTO`
+  skips only after the frame pacer finds a frame late, at most two in a row
+  (never below 20 drawn fps). In an x86 run, PPU plus presentation was half
+  of each frame: uncapped speed went from 367 to 686 fps with `2`.
+- The launcher switches the CPU governor to `performance` while the game runs
+  and restores the previous one on exit (`HOD_KEEP_GOVERNOR=1` to skip).
+- Diagnostics in `ports/hod/`: `log.txt` gets the governor and a `perf:` line
+  every ~5 s (`HOD_PERF_LOG=1`); `frame_phase.csv` (written on exit,
+  `GBARECOMP_FRAME_PHASE`) has a per-frame breakdown in microseconds: guest
+  code (incl. PPU), render copy, present (incl. the bottom screen), audio,
+  input and pacer wait. Both are on in this build and cost nothing measurable.
+
+### Native BIOS
+
+BIOS HLE (`--bios-hle`) runs the math, copy and decompression SWIs in C++, but
+the IRQ vector, `Halt`, `VBlankIntrWait`, `SoftReset` and `RegisterRamReset`
+still need BIOS code every frame. Without a recompiled BIOS that code — and
+everything it calls, including the game's own interrupt handler — ran through
+the interpreter bridge: about 75 000 interpreted instructions per frame, each
+syncing the CPU state, which was the first device report (~5 fps; `bridged
+0x00000018 / 0x00000138 / 0x00000008` in `log.txt`).
+
+`rocknix/bios/port_bios.s` is a small replacement BIOS written for this port
+from GBATEK's description (no Nintendo code) that implements exactly those
+calls. It is recompiled with `gba_recompile --bios` (`scripts/gen-port-bios.sh`;
+the output in `rocknix/bios/generated/` is committed) and linked into every
+build, and the package ships the matching `port_bios.bin`. The run is now
+`FULLY_STATIC` with 0 interpreted instructions, and x86 uncapped speed went
+from 148 to 367 fps.
+
+To use your own BIOS instead, put the dump at `rocknix/bios/gba_bios.bin`
+before building: `build.sh` recompiles it and the game then expects
+`gba_bios.bin` in `ports/hod/`. That binary contains BIOS-derived code — keep
+it for your own device.
 
 ## Testing without the device
 
@@ -141,8 +170,7 @@ from a RAM dump for comparison with the game's map screen.
 | Tool | Purpose |
 |:--|:--|
 | `hod_probe.c` + `run_probe.sh` | libmgba runner with scripted input, RAM dumps, screenshots and watchpoints (how the RAM layout and map routines were found) |
-| `run_x86_test.sh` | Native x86_64 build + headless run (SDL offscreen) of the real port with your ROM, a scripted new game (`make_replay.py`) and simulated taps; dumps both screens every N frames |
-| `test_bios.s` | Stand-in IRQ/Halt/IntrWait-only BIOS for those runs (never shipped) |
+| `run_x86_test.sh` | Native x86_64 build + headless run (SDL offscreen) of the real port with your ROM, the port BIOS, a scripted new game (`make_replay.py`) and simulated taps; dumps both screens every N frames |
 | `tests/map_render_test.cpp` | Renders the castle map from a ROM + RAM dump |
 
 Development environment variables (all off by default): `HOD_DEBUG_TAPS`,
@@ -170,6 +198,6 @@ names `d11a362`, but the generated code in `src/game` uses the tail-call macros
 ## Pending on-device verification
 
 - [ ] Window placement and touch mapping on the RG DS Plus (log: `dual_screen: bottom window on display …`).
-- [ ] Locked 60 fps on the stock governor (`HOD_PERF_LOG=1`).
+- [ ] Locked 60 fps with the port BIOS (`perf:` lines in `log.txt`, `frame_phase.csv`). The first build, without a native BIOS, ran at about 5 fps.
 - [ ] Controller face-button mapping under PortMaster's `control.txt` (`INTERCAMBIAR A/B` exists in case it is reversed).
 - [ ] Real suspend/resume (`suspend: going to sleep` / `suspend: resumed` in `log.txt`).

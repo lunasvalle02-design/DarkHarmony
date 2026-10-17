@@ -17,6 +17,7 @@ struct PortConfig {
     bool swap_ab = false;
     bool resume_after_sleep = true; // suspend state if the battery dies asleep
     bool show_fps = false;
+    int frame_skip = -1;            // -1 auto, 0 off, 1..2 frames skipped per drawn one
     int map_zoom = 1;               // 1 whole castle, 2 follow the player
     Language language = Language::Spanish;
 

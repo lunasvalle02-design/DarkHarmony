@@ -3,12 +3,11 @@
 #   JOBS=n      parallel jobs (default: nproc, capped by memory: ~1.5 GB per job)
 #   GUEST_OPT   optimization of the recompiled game code (default -O2)
 #
-# Optional native BIOS: put your own dump at rocknix/bios/gba_bios.bin and it is
-# recompiled into the binary (gba_recompile --bios). The BIOS code that HLE
-# leaves running every frame (IRQ vector, Halt, VBlankIntrWait) then runs as
-# native code instead of through the interpreter: ~60% less CPU per frame in
-# testing. A binary built this way contains BIOS-derived code — keep it for
-# your own device and never redistribute it.
+# Native BIOS: the port BIOS (rocknix/bios/port_bios.s, pre-recompiled in
+# rocknix/bios/generated) is linked by default. To use your own dump instead,
+# put it at rocknix/bios/gba_bios.bin and it is recompiled into the binary
+# (gba_recompile --bios). A binary built that way contains BIOS-derived code —
+# keep it for your own device and never redistribute it.
 set -eu
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD="$ROOT/build/rocknix"
@@ -41,6 +40,9 @@ if [ -f "$BIOS" ]; then
   fi
   # shellcheck disable=SC2086
   "$ROOT/build/host-tools/gba_recompile" --bios "$BIOS" $CONFIG --out "$GEN_BIOS" | tail -2
+else
+  rm -rf "$BUILD/generated_bios"
+  echo "== native BIOS: port BIOS (rocknix/bios/port_bios.s)"
 fi
 
 cmake -S "$ROOT/rocknix" -B "$BUILD" -G Ninja \

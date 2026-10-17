@@ -44,11 +44,16 @@ set(GBARECOMP_ENABLE_MODS OFF CACHE BOOL "" FORCE)
 # instead of interpreting it every frame. The result embeds BIOS-derived code:
 # never redistribute a binary built this way.
 set(HOD_GENERATED_BIOS_DIR "" CACHE PATH "gba_recompile --bios output directory")
+# Without it the port BIOS (rocknix/bios/port_bios.s, written for this port)
+# is linked instead: the same calls, native, with no BIOS dump needed at all.
 if(HOD_GENERATED_BIOS_DIR)
     set(GBARECOMP_GENERATED_BIOS_DIR "${HOD_GENERATED_BIOS_DIR}" CACHE PATH "" FORCE)
+    set(HOD_PORT_BIOS 0)
 else()
-    set(GBARECOMP_GENERATED_BIOS_DIR "${GBARECOMP_ROOT}/src/runtime/generated_bios" CACHE PATH "" FORCE)
+    set(GBARECOMP_GENERATED_BIOS_DIR "${HOD_ROOT}/rocknix/bios/generated" CACHE PATH "" FORCE)
+    set(HOD_PORT_BIOS 1)
 endif()
+message(STATUS "hod: native BIOS = ${GBARECOMP_GENERATED_BIOS_DIR}")
 add_subdirectory("${GBARECOMP_ROOT}" gbarecomp-build EXCLUDE_FROM_ALL)
 
 # Runtime libraries are speed-critical too (PPU, scheduler, bus): keep them at
@@ -109,7 +114,7 @@ target_include_directories(hod PRIVATE
     "${GBARECOMP_ROOT}/src/gba"
     "${GBARECOMP_ROOT}/src/runtime"
     ${SDL2_INCLUDE_DIRS})
-target_compile_definitions(hod PRIVATE GBARECOMP_HAVE_SDL2)
+target_compile_definitions(hod PRIVATE GBARECOMP_HAVE_SDL2 HOD_PORT_BIOS=${HOD_PORT_BIOS})
 target_compile_options(hod PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(hod PRIVATE
     -Wl,--whole-archive hod_guest_code -Wl,--no-whole-archive

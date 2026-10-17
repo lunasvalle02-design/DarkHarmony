@@ -99,3 +99,6 @@ dist/
 !rocknix/port/**
 !rocknix/port/hod/README.txt
 !rocknix/port/port.json
+!rocknix/bios/port_bios.bin
+!rocknix/bios/generated/
+!rocknix/bios/generated/**

@@ -14,6 +14,6 @@ fi
 # Never overwrite the player's saves, settings or game files on the device.
 rsync -rlt --info=progress2 -e "$SSH" \
   --exclude 'saves/' --exclude 'hod.cfg' --exclude '*.gba' --exclude 'gba_bios.bin' \
-  --exclude '*.state*' --exclude 'log.txt' \
+  --exclude '*.state*' --exclude 'log.txt' --exclude 'frame_phase.csv' \
   "$ROOT/dist/ports/" "$USER_@$DEVICE_IP:$DEST/"
 echo "deployed to $DEVICE_IP:$DEST — refresh the game list in EmulationStation"

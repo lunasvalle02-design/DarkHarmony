@@ -12,6 +12,7 @@ enum class Str : int {
     TopScreen, ScaleFit, ScaleInteger, ScaleStretch,
     Filter, Sharp, Smooth,
     Volume, MenusBelow, SwapAB, Turbo, ShowFps, ResumeAfterSleep,
+    FrameSkip, Auto,
     SaveState, LoadState, Language, LanguageName, Quit,
     Yes, No, TapAgain, StateSaved, StateLoaded, Saving,
     PauseMenu, GameMap, OnBottomScreen, CloseHint, NotInCastle, ZoomHint,

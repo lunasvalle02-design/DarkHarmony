@@ -1,7 +1,8 @@
 // Castlevania: Harmony of Dissonance (USA, ACHE) — ROCKNIX / PortMaster entry
 // point for dual-screen handhelds (Anbernic RG DS / RG DS Plus).
 //
-// No launcher: the ROM and BIOS are looked up next to the executable, the game
+// No launcher: the ROM is looked up next to the executable (the BIOS is the
+// port BIOS shipped with it, or your dump in a retail-BIOS build), the game
 // runs fullscreen on the primary display and the bottom screen is driven by
 // dual_screen.cpp. Settings live in hod.cfg (edited from the bottom screen).
 //
@@ -70,6 +71,7 @@ fs::path find_rom(const fs::path& dir) {
     return {};
 }
 
+#if !HOD_PORT_BIOS
 fs::path find_bios(const fs::path& dir) {
     for (const fs::path& p : {dir / "gba_bios.bin", dir / "bios" / "gba_bios.bin", dir / "bios.bin",
                               dir / "gba_bios.BIN"}) {
@@ -78,6 +80,7 @@ fs::path find_bios(const fs::path& dir) {
     }
     return {};
 }
+#endif
 
 // Guest call chains run on the host stack; the desktop build reserves 64 MiB.
 // On Linux the main thread's stack follows RLIMIT_STACK at exec time, so raise
@@ -143,11 +146,22 @@ int main(int argc, char** argv) {
                      rom.c_str(), rom_sha1.c_str(), kRomSha1);
         return 1;
     }
+#if HOD_PORT_BIOS
+    // The BIOS code linked into this binary is the port BIOS
+    // (rocknix/bios/port_bios.s): map the matching image, not a retail dump.
+    if (bios.empty()) bios = dir / "port_bios.bin";
+#else
     if (bios.empty()) bios = find_bios(dir);
+#endif
     if (bios.empty() || fs::file_size(bios, ec) != kBiosSize) {
+#if HOD_PORT_BIOS
+        std::fprintf(stderr, "[hod] port_bios.bin is missing from %s (reinstall the port)\n", dir.c_str());
+#else
         std::fprintf(stderr, "[hod] GBA BIOS not found: copy your 16 KiB gba_bios.bin into %s\n", dir.c_str());
+#endif
         return 1;
     }
+    const std::string bios_sha1 = sha1_of_file(bios);
 
     fs::create_directories(dir / "saves", ec);
     const fs::path save = dir / "saves" / "hod.sav";
@@ -184,11 +198,12 @@ int main(int argc, char** argv) {
     }
     args.insert(args.end(), {"--rom", rom.string(),
                                      "--bios", bios.string(),
+                                     "--bios-sha1", bios_sha1,
                                      "--rom-sha1", kRomSha1,
                                      "--save", save.string(),
                                      "--volume", std::to_string(config.volume),
-                                     // SWIs run natively (HLE); with a recompiled
-                                     // BIOS linked, IRQ/Halt/IntrWait are native too.
+                                     // SWIs run natively (HLE); IRQ/Halt/IntrWait
+                                     // run in the recompiled BIOS linked in.
                                      "--bios-hle",
                                      "--window",
                                      "--fullscreen"});
